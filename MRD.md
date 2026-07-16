@@ -187,6 +187,8 @@ Final AI prompt for Google Jules
 
 The Contribution Blueprint acts as the bridge between repository discovery and AI-assisted implementation.
 
+Every completed Contribution Blueprint is versioned (containing version number, blueprint group ID, superseded blueprint ID, prompt version, and target commit SHA). Completing or regenerating a blueprint must never overwrite a completed version.
+
 15. Contribution Prioritization Strategy
 Recommendations should prioritize opportunities in the following order:
 
@@ -216,7 +218,8 @@ Recommendations should feel personalized rather than generic.
 17. Repository Analysis
 Repository analysis begins only after the user opens a recommended repository.
 The generated analysis is cached.
-The cache is refreshed when repository changes invalidate previous analysis.
+Repository analyses must be tied to a specific repository ID, default branch, commit SHA, and analysis version.
+The cache is refreshed / invalidated when repository changes (new commits or default branch updates) make the existing analysis stale.
 This balances freshness with computational efficiency.
 
 18. Search
@@ -231,9 +234,10 @@ AI recommendations remain the primary experience.
 Users should be able to:
 
 View recent repositories.
-Reopen previous Contribution Blueprints.
+Reopen previous Contribution Blueprints (all versions).
 Save repositories for later exploration.
 
+To avoid conflicting data and state synchronization issues (e.g. recommendation active vs. saved vs. viewed), a unified repository state tracker (one document per user and repository) must manage saves, views, and dismissed states.
 
 20. AI Principles
 Every AI-generated result must be:
@@ -249,7 +253,7 @@ The platform should avoid hallucinating contribution opportunities.
 21. Edge Cases
 The platform should gracefully handle:
 
-Empty GitHub profiles
+Empty GitHub profiles (allow users to self-select skills, languages, frameworks, interests, and difficulty preferences, persisting them in a preferences store)
 No matching repositories
 Repository archived after analysis
 Missing README
@@ -288,7 +292,23 @@ Practical developer value
 24. Long-Term Vision
 OpenScout.ai aims to become the default starting point for developers entering open source.
 Rather than searching endlessly for projects and manually understanding unfamiliar repositories, developers receive intelligent recommendations, contextual onboarding, and a structured Contribution Blueprint that prepares them to contribute confidently using AI while remaining fully in control of the final code.
+
 North Star Statement
 
 Help every developer discover the right open-source project and become ready to contribute in minutes, not hours.
 
+
+25. Data Retention & Deletion Policy
+A clean production environment requires explicit retention limits:
+- User accounts and associated data must be deleted cascadingly upon request.
+- OAuth connections must be disconnected and credentials purged when requested by the user.
+- AI observability logs (token usage, latency, provider data) must be auto-purged after 30 days.
+- Developer profile analysis logs and temporary run caches are pruned after 30 days.
+- Audit logs should be kept for at least 1 year for compliance.
+- Inactive background job logs should be cleaned up after 7 days.
+
+26. Durable Background Job Model
+To support frontend polling and worker recovery during long-running async steps (profile analysis, repository crawling, blueprint generation), the system must use a durable background job state model tracking status, attempt counts, leases, timeouts, idempotency keys, and dead-letter states.
+
+27. Security and OAuth Connection Isolation
+User access credentials (such as GitHub OAuth tokens) must not be stored on the main user record. They must reside in a separate, encrypted collection with strict access scopes, reducing security impact if a user document is exposed.

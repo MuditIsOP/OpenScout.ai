@@ -182,12 +182,14 @@ Each feature below includes functional requirements, user stories, acceptance cr
 - Rate limit hit during token exchange → queue/retry with backoff; inform user if delay exceeds a few seconds.
 
 **API Expectations**
-- `POST /api/auth/github/callback` — exchanges OAuth code for access token, creates/updates user, returns session token.
+- `POST /api/auth/github/callback` — exchanges OAuth code for access token, syncs user, updates connections, returns session token.
 - `POST /api/auth/logout` — invalidates session.
 - `GET /api/auth/me` — returns current authenticated user summary.
 
 **Database Requirements**
-- `users` table: `id`, `github_id`, `github_username`, `avatar_url`, `access_token` (encrypted at rest), `created_at`, `last_login_at`, `profile_analysis_status`.
+- `users` table: `id`, `clerk_id`, `github_id`, `github_username`, `avatar_url`, `created_at`, `last_login_at`, `profile_analysis_status`.
+- `oauth_connections` table: `id`, `user_id` (FK), `provider`, `access_token` (encrypted), `refresh_token` (encrypted), `scopes` (array), `token_status`, `key_rotation_metadata` (JSON), `created_at`, `updated_at`.
+- `user_preferences` table: `id`, `user_id` (FK), `skills` (array), `languages` (array), `frameworks` (array), `interests` (array), `contribution_preferences` (array), `difficulty_preference`, `jules_api_key` (encrypted), `created_at`, `updated_at`.
 
 **Screens**
 - **Login screen:** Product value prop (one-liner + tagline), single "Continue with GitHub" CTA. No secondary auth options for MVP.
@@ -200,13 +202,14 @@ Each feature below includes functional requirements, user stories, acceptance cr
 - `auth_login_started`, `auth_login_succeeded`, `auth_login_failed` (with reason category), `auth_logout`.
 
 **Security Considerations**
-- Store GitHub access tokens encrypted at rest.
-- Never expose access tokens to the client.
+- Store GitHub access tokens and refresh tokens in `oauth_connections`, encrypted at rest using AES-GCM (256-bit).
+- Never expose the `oauth_connections` record or access tokens to the client via normal user endpoints.
+- Establish credentials isolation: a compromise of user profile data does not expose OAuth tokens.
 - Use state parameter / PKCE to prevent CSRF on OAuth flow.
 - Scope requests to the minimum required (principle of least privilege) — re-affirms FR-1.2.
 
 **Implementation Notes**
-- **Authentication Provider:** Clerk is the designated authentication provider. GitHub OAuth credentials and session tokens will be managed through Clerk.
+- **Authentication Provider:** Clerk is the designated authentication provider. GitHub OAuth credentials and session tokens will be managed through Clerk, and sync'd to the backend database's `oauth_connections` on login/refresh.
 
 ---
 
@@ -232,6 +235,8 @@ Each feature below includes functional requirements, user stories, acceptance cr
 - FR-2.4: Analysis output must include a confidence indicator per inferred attribute, consistent with the platform-wide AI Principles (§9).
 - FR-2.5: Analysis results are persisted and displayed on the dashboard (§6.9) as the "detected skills" summary.
 - FR-2.6: Analysis should be refreshed on a defined cadence or trigger (TBD: exact refresh policy — e.g., on each login if last analysis is older than N days). Recommendation: refresh if analysis is >7 days old, configurable.
+- FR-2.7: For every profile analysis run, the system must generate and persist an immutable evidence snapshot (`profile_snapshots`) capturing the source evidence (GitHub repositories examined, commit frequencies, issue details, PR contributions, language statistics) and the scoring rationale to explain and reproduce user classifications.
+
 
 **Acceptance Criteria**
 - Given a user with public repositories, when profile analysis completes, then the dashboard shows a non-empty list of detected languages/frameworks/domains with confidence indicators.
@@ -249,7 +254,9 @@ Each feature below includes functional requirements, user stories, acceptance cr
 - `GET /api/profile/me` — returns current profile analysis, including per-attribute confidence scores and `analysis_status` (`pending` | `in_progress` | `complete` | `failed`).
 
 **Database Requirements**
-- `developer_profiles` table: `user_id`, `languages` (JSON, with weight/confidence), `frameworks` (JSON), `topics` (JSON), `experience_level` (enum: beginner/intermediate/experienced), `experience_confidence`, `contribution_history_summary`, `project_domains` (JSON), `last_analyzed_at`, `analysis_status`.
+- `developer_profiles` table: `id`, `user_id` (FK), `experience_level`, `experience_confidence`, `contribution_history_summary`, `project_domains` (JSON), `last_analyzed_at`, `analysis_version`.
+- `profile_snapshots` table: `id`, `user_id` (FK), `developer_profile_id` (FK), `inferred_skills` (JSON), `source_evidence` (JSON), `scoring_rationale`, `created_at`.
+
 
 **Screens**
 - No dedicated screen; surfaces within the Dashboard (§6.9) as a "Your Profile" / "What we detected" module.
@@ -298,6 +305,8 @@ Each feature below includes functional requirements, user stories, acceptance cr
 - FR-3.4: The engine must optimize primarily for beginner usefulness while remaining useful to experienced users (§3.3) — implemented via explicit difficulty labeling and match-quality signals rather than separate recommendation logic paths (TBD: confirm single vs. dual recommendation logic — MRD implies one engine with experience-aware weighting, not two separate engines).
 - FR-3.5: Recommendations must show a match percentage and confidence level (MRD §16).
 - FR-3.6: Recommendation list must exclude repositories the user has already dismissed/saved-and-completed (TBD: exact dismissal/feedback mechanism — not specified in MRD; recommend a simple "not interested" affordance feeding back into future ranking, marked TBD for scope confirmation).
+- FR-3.7: Every recommendation generation batch must be tracked via a `recommendation_runs` record, linking the recommendation list to a specific profile version/snapshot, scoring algorithm, evaluation parameters, and evaluation candidates count, and protected by an `idempotency_key`.
+
 
 **Acceptance Criteria**
 - Given a completed developer profile, when the user views the dashboard, then they see a ranked list of recommended repositories, each with a visible explanation, match %, and confidence level.
@@ -314,8 +323,10 @@ Each feature below includes functional requirements, user stories, acceptance cr
 - `POST /api/recommendations/feedback` — (TBD scope) records dismiss/save/not-interested signal.
 
 **Database Requirements**
-- `recommendations` table: `id`, `user_id`, `repository_id`, `match_score`, `confidence_score`, `reasons` (JSON array of explanation strings/factors), `generated_at`, `status` (active/dismissed/saved).
-- `repositories` table (shared with §6.4/6.5): `id`, `github_repo_id`, `full_name`, `description`, `primary_language`, `topics` (JSON), `stars`, `forks`, `open_issues_count`, `last_commit_at`, `license`, `is_fork`, `is_archived`, `health_score`, `beginner_friendly_score`, `doc_quality_score`, `size_kb`, `cached_at`.
+- `recommendation_runs` table: `id`, `user_id` (FK), `profile_snapshot_id` (FK), `scoring_algorithm_version`, `filters_applied` (JSON), `candidates_evaluated_count`, `idempotency_key`, `created_at`.
+- `recommendations` table: `id`, `recommendation_run_id` (FK), `user_id` (FK), `repository_id` (FK), `match_score`, `confidence_score`, `reasons` (JSON array), `created_at`.
+- `repositories` table (shared with §6.4/6.5): `id`, `github_repo_id`, `full_name`, `description`, `primary_language`, `topics` (JSON), `stars`, `forks`, `open_issues_count`, `last_commit_at`, `license`, `is_fork`, `is_archived`, `health_score`, `beginner_friendly_score`, `doc_quality_score`, `size_kb`, `eligibility_status`, `eligibility_reasons` (JSON), `cached_at`.
+
 
 **Screens**
 - **Dashboard / Recommendations feed:** Card-based list; each card shows repo name, one-line AI summary, match %, top 2–3 reasons, difficulty badge, language/framework tags.
@@ -412,13 +423,13 @@ Each feature below includes functional requirements, user stories, acceptance cr
   - Estimated onboarding difficulty
   - AI confidence score
 - FR-5.2: **Analysis begins only after the user opens the repository** — no upfront analysis for every recommended repo (explicit MRD §17 / planning context requirement, primarily for cost control).
-- FR-5.3: Analysis results are cached (§6.5.1) and reused on subsequent opens unless invalidated.
+- FR-5.3: Analysis results are cached (§6.5.1) and reused on subsequent opens unless invalidated. Analysis trigger requests require an `idempotency_key` to prevent duplicate concurrent analyses.
 - FR-5.4: If analysis is in progress, the page must show a clear, distinct loading state (not a blank page) — this is the moment where the product's "AI is working" moment should feel intentional and premium, not laggy.
 
 **6.5.1 Caching Behavior**
-- FR-5.5: Repository analysis is cached per repository (not per user, since the underlying repo summary is not user-specific — only the *recommendation reasoning* is user-specific).
-- FR-5.6: Cache is refreshed when repository changes invalidate previous analysis (MRD §17) — e.g., new commits past a threshold, README changes, issue set changes materially. **Exact invalidation triggers/thresholds are TBD.**
-- FR-5.7: Cached analysis displays a "last analyzed" timestamp for transparency.
+- FR-5.5: Repository analysis is cached per repository, default branch, target commit SHA, and analysis version (not per user, since the underlying repo summary is not user-specific).
+- FR-5.6: Cache invalidation happens when the default branch changes or a new commit is pushed. The cache must be refreshed/re-generated when changes render the previous analysis version stale.
+- FR-5.7: Cached analysis displays a "last analyzed" timestamp, default branch name, commit SHA, and analysis version for transparency.
 
 **Acceptance Criteria**
 - Given a user opens a repository for the first time, when no cached analysis exists, then analysis is triggered and a loading state is shown until complete.
@@ -436,7 +447,8 @@ Each feature below includes functional requirements, user stories, acceptance cr
 - `GET /api/repositories/:id/analysis-status` — for polling during analysis (or use websocket/SSE — implementation detail, TBD).
 
 **Database Requirements**
-- `repository_analyses` table: `repository_id`, `summary_text`, `tech_stack` (JSON), `activity_summary`, `community_summary`, `contribution_friendliness_score`, `onboarding_difficulty` (enum), `confidence_score`, `analyzed_at`, `cache_invalidated_at` (nullable).
+- `repository_analyses` table: `id`, `repository_id` (FK), `default_branch`, `commit_sha`, `analysis_version`, `summary_text`, `tech_stack` (JSON), `activity_summary`, `community_summary`, `contribution_friendliness_score`, `onboarding_difficulty` (enum), `confidence_score`, `analyzed_at`, `cache_invalidated_at` (nullable).
+
 
 **Screens**
 - **Repository Detail Page:** Header (name, stars, license, activity badges) → AI Summary module (with confidence badge) → Tech Stack tags → Community/health signals → Open Issues preview (feeds into §6.6) → "Generate Contribution Blueprint" primary CTA.
@@ -478,6 +490,8 @@ Each feature below includes functional requirements, user stories, acceptance cr
 - FR-6.2: The system must never invent a contribution idea (tier 8) if legitimate issues (tiers 1–3) already exist and are suitable for the user's level. This ordering is explicitly intentional per MRD and must not be reordered or "optimized" by ranking logic.
 - FR-6.3: Each surfaced opportunity must show its tier/category so the user understands whether it's a real GitHub issue vs. an AI-suggested idea.
 - FR-6.4: Opportunity selection should factor in the user's estimated experience level (from §6.2) to avoid surfacing something too advanced/too trivial as the "recommended" pick — while still listing other available options.
+- FR-6.5: To prevent recommending closed, assigned, or stale issues, the system must capture and periodically verify opportunity freshness signals, including: GitHub issue number, current issue state, assignees, linked pull requests, last issue activity, last verification time, expiration time, relevant verified file paths, and possibly-claimed state.
+
 
 **Acceptance Criteria**
 - Given a repository has open "good first issue"-labeled issues, when opportunities are generated, then those issues are shown before any AI-generated idea, regardless of how "good" an AI idea might seem.
@@ -492,7 +506,8 @@ Each feature below includes functional requirements, user stories, acceptance cr
 - `GET /api/repositories/:id/opportunities` — returns tiered list of opportunities with tier label, source (GitHub issue link vs. AI-generated), and confidence (for tier 8 only).
 
 **Database Requirements**
-- `contribution_opportunities` table: `id`, `repository_id`, `tier` (1–8), `source_type` (github_issue | ai_generated), `github_issue_url` (nullable), `title`, `description`, `confidence_score` (nullable, required if tier=8), `estimated_difficulty`, `created_at`.
+- `contribution_opportunities` table: `id`, `repository_id` (FK), `repository_commit_sha`, `tier` (1–8), `source_type` (github_issue | ai_generated), `github_issue_number` (nullable), `github_issue_url` (nullable), `current_issue_state` (nullable), `assignees` (array), `linked_pull_requests` (array), `title`, `description`, `confidence_score` (nullable, required if tier=8), `estimated_difficulty`, `last_issue_activity` (nullable), `last_verification_time`, `expiration_time` (nullable), `relevant_verified_file_paths` (array), `is_possibly_claimed`, `created_at`.
+
 
 **Screens**
 - Embedded within Repository Detail Page (§6.5) as an "Opportunities" section, and feeds directly into Blueprint generation (§6.7) as the selection step ("Choose what to work on").
@@ -536,8 +551,10 @@ Each feature below includes functional requirements, user stories, acceptance cr
   - Final AI-generated prompt prepared for Google Jules
 - FR-7.2: Blueprint generation is triggered from the Repository Detail Page after the user selects a contribution opportunity (or accepts the top-recommended one).
 - FR-7.3: The final Jules prompt must be grounded in the actual repository analysis and selected opportunity — not generic boilerplate. It should read as if a knowledgeable teammate prepared context notes for whoever picks this up.
-- FR-7.4: The Blueprint must be persisted and reopenable from Saved History (§6.11).
-- FR-7.5: The Blueprint must be editable/regenerable at least at a basic level (TBD: exact editing capability — e.g., can the user swap the selected opportunity and regenerate, vs. fully free-text edit the output). Recommend: allow swapping the selected opportunity and regenerating; full free-text editing of AI output is a nice-to-have, not MVP-critical.
+- FR-7.4: The Blueprint must be persisted and reopenable from Saved History (§6.11). A completed blueprint must never be overwritten.
+- FR-7.5: The Blueprint must be regenerable or versionable. When a user requests regeneration (due to repository changes, prompt adjustments, AI model updates, or opportunity changes), the system generates a new version linked to the same blueprint group, incrementing the version count and tracking the superseded blueprint ID.
+- FR-7.6: To prevent duplicate concurrent generation of blueprint versions, every generation request must require and be protected by a unique `idempotency_key`.
+
 
 **Acceptance Criteria**
 - Given a user selects a contribution opportunity, when they trigger Blueprint generation, then all required sections (FR-7.1) are populated before the Blueprint is presented as "ready."
@@ -557,7 +574,8 @@ Each feature below includes functional requirements, user stories, acceptance cr
 - `PATCH /api/blueprints/:id` — regenerate/update (e.g., swap opportunity).
 
 **Database Requirements**
-- `blueprints` table: `id`, `user_id`, `repository_id`, `opportunity_id`, `repository_understanding`, `match_explanation`, `confidence_level`, `estimated_difficulty`, `estimated_effort`, `learning_objectives` (JSON array), `constraints` (JSON array), `suggested_reading_order` (JSON array), `implementation_strategy`, `final_jules_prompt`, `status` (draft | complete), `created_at`, `updated_at`.
+- `blueprints` table: `id`, `blueprint_group_id`, `version`, `supersedes_blueprint_id` (FK, nullable), `user_id` (FK), `repository_id` (FK), `repository_commit_sha`, `opportunity_id` (FK), `prompt_version`, `output_schema_version`, `repository_understanding`, `match_explanation`, `confidence_level`, `estimated_difficulty`, `estimated_effort`, `learning_objectives` (JSON array), `constraints` (JSON array), `suggested_reading_order` (JSON array), `implementation_strategy`, `final_jules_prompt`, `idempotency_key`, `status` (generating | complete | failed), `created_at`.
+
 
 **Screens**
 - **Blueprint Generation loading screen:** Distinct, premium loading sequence — this is a signature moment; consider showing progressive section-by-section reveal as each part completes rather than one flat spinner (demo-quality requirement per §1.4).
@@ -601,7 +619,9 @@ Authentication uses a per-user Jules API key passed via the `X-Goog-Api-Key` hea
 - FR-8.2: **Graceful degradation:** If the Jules API is unreachable, the user hasn't configured their Jules API key, or the Jules GitHub App is not installed on the target repository, the prompt is displayed in a polished, copy-to-clipboard block. This must be designed as a deliberate, finished experience — not a broken state.
 - FR-8.3: Regardless of implementation path, OpenScout.ai's responsibility ends at handing off complete, well-structured context. It must **never** attempt to write code, create commits, open PRs, or perform any implementation action itself (hard boundary, MRD §22).
 - FR-8.4: After handoff, the Blueprint remains saved and accessible (developer may return to reference it mid-implementation).
-- FR-8.5: The user's Jules API key is stored securely in their profile (via Clerk user metadata or an encrypted field in the `users` collection). OpenScout.ai provides a settings screen for users to add/update/remove their Jules API key.
+- FR-8.5: The user's Jules API key is stored securely (encrypted) in their `user_preferences` record. OpenScout.ai provides a settings screen for users to add/update/remove their Jules API key.
+- FR-8.6: Every handoff session creation request must carry a unique `idempotency_key` to prevent duplicate sessions from being created on Google Jules.
+
 
 **Acceptance Criteria**
 - Given a completed Blueprint and a configured Jules API key, when the user selects "Continue to Google Jules," then the backend creates a Jules Session via the API and the user is redirected to `jules.google.com` with all context pre-loaded — zero manual re-entry required.
@@ -624,9 +644,9 @@ Authentication uses a per-user Jules API key passed via the `X-Goog-Api-Key` hea
   6. On failure, returns `{ prompt: final_jules_prompt, method: "copy", error_reason }` so the frontend can display the copy-paste fallback.
 
 **Database Requirements**
-- No new tables required for the core flow; reuses `blueprints.final_jules_prompt`.
-- `users` collection: add `jules_api_key` field (encrypted string, nullable) — stores the user's Jules API key.
-- `handoff_events` table: `blueprint_id`, `method` [`api`|`copy`], `jules_session_id` (nullable), `jules_session_url` (nullable), `error_reason` (nullable), `initiated_at`.
+- `user_preferences` collection: contains encrypted `jules_api_key` (nullable).
+- `handoff_events` table: `id`, `blueprint_id` (FK), `method` (`api` | `copy`), `jules_session_id` (nullable), `jules_session_url` (nullable), `error_reason` (nullable), `idempotency_key`, `initiated_at`.
+
 
 **Screens**
 - **Handoff screen/modal:** Blueprint summary recap (compact) + prominent "Continue to Google Jules" button. When clicked, a loading state is shown while the backend calls the Jules API. On success, the user is redirected. The prompt itself remains visible/copyable as a safety net regardless of the API outcome.
@@ -756,9 +776,10 @@ Authentication uses a per-user Jules API key passed via the `X-Goog-Api-Key` hea
 > As a developer, I want to come back later and see the repositories I explored and the Blueprints I generated, so I don't lose my progress.
 
 **Functional Requirements**
-- FR-11.1: Users can view recently opened repositories (MRD §19).
-- FR-11.2: Users can reopen previously generated Contribution Blueprints (MRD §19).
-- FR-11.3: Users can save repositories for later exploration, independent of having generated a Blueprint yet (MRD §19).
+- FR-11.1: Users can view recently opened repositories, with states maintained under a unified user-repository state record (MRD §19).
+- FR-11.2: Users can reopen previously generated Contribution Blueprints, with version history intact (MRD §19).
+- FR-11.3: Users can save repositories for later exploration. Both views and saves are tracked using a single `user_repository_states` document per user and repository, resolving conflicting statuses.
+
 
 **Acceptance Criteria**
 - Given a user has previously opened repositories, when they visit their history, then those repositories are listed in most-recent-first order with quick access back to their detail pages.
@@ -775,9 +796,9 @@ Authentication uses a per-user Jules API key passed via the `X-Goog-Api-Key` hea
 - `POST /api/repositories/:id/save` / `DELETE /api/repositories/:id/save` — save/unsave for later.
 
 **Database Requirements**
-- `repository_views` table: `user_id`, `repository_id`, `viewed_at` (for recency ordering; dedupe on repeat views by updating timestamp rather than inserting duplicates).
-- `saved_repositories` table: `user_id`, `repository_id`, `saved_at`.
+- `user_repository_states` table: `id`, `user_id` (FK), `repository_id` (FK), `is_saved`, `saved_at` (nullable), `is_viewed`, `last_viewed_at` (nullable), `recommendation_state` (active/dismissed/completed), `created_at`, `updated_at`.
 - Blueprints already persisted per §6.7 (`blueprints` table), queried by `user_id`.
+
 
 **Screens**
 - **History/Saved page:** Tabbed or sectioned view — "Recently Viewed," "Saved," "Blueprints" — each as a simple, scannable list reusing existing card components from Dashboard/Search for visual consistency.
@@ -796,6 +817,49 @@ Authentication uses a per-user Jules API key passed via the `X-Goog-Api-Key` hea
 
 **Implementation Notes**
 - This feature is straightforward CRUD/list functionality — good candidate to build with the leftover time after the core discovery→Blueprint→handoff flow (§5) is demo-solid, rather than front-loading effort here.
+
+---
+
+### 6.12 Feature: Background Job Worker Queue (Durable Background Jobs)
+
+**Purpose:** Provide a durable, retriable queue for long-running asynchronous tasks (profile analysis, repository crawling, opportunity discovery, and blueprint generation) to support worker recovery, progress polling, and idempotency.
+
+**Functional Requirements:**
+- FR-12.1: Long-running async steps must be initiated by writing a task to the `background_jobs` store, returning a `job_id` and setting status to `queued`.
+- FR-12.2: Workers claim jobs by atomically updating the job's `status` to `running`, writing their `worker_lease` identifier, and setting a `timeout` timestamp.
+- FR-12.3: If a job fails, the system increments the `attempt_count` and schedules a retry (up to a max of `retries`).
+- FR-12.4: If a job exceeds its maximum retries, it is placed in the `dead_letter` state for diagnostic review.
+- FR-12.5: All jobs require an `idempotency_key` to guarantee duplicate request retries from the client do not spin up duplicate jobs.
+
+**Database Requirements:**
+- `background_jobs` table: `id`, `job_type`, `status` (queued/running/completed/failed/dead_letter), `retries`, `attempt_count`, `idempotency_key`, `worker_lease`, `timeout`, `dead_letter_state` (JSON), `payload` (JSON), `created_at`, `updated_at`.
+
+---
+
+### 6.13 Feature: AI Observability and Prompt Tracking (AI Runs)
+
+**Purpose:** Provide detailed run monitoring, token tracking, latency auditing, and cost estimations for LLM generation tasks.
+
+**Functional Requirements:**
+- FR-13.1: Every external AI/LLM request must record provider, model, latency, prompt version, schema version, and token usage.
+- FR-13.2: To protect developer and repository privacy, prompts containing sensitive, user-specific, or proprietary code context must be hashed (`grounding_evidence_hash`) or sanitized prior to writing to the logs. Unrestricted raw prompts containing sensitive parameters must never be stored.
+- FR-13.3: Estimates of cost must be calculated programmatically based on token counts and model pricing matrices.
+
+**Database Requirements:**
+- `ai_runs` table: `id`, `provider`, `model`, `prompt_version`, `output_schema_version`, `token_usage` (JSON), `latency_ms`, `validation_failure` (boolean), `fallback_provider_usage` (boolean), `grounding_evidence_hash`, `estimated_cost`, `created_at`.
+
+---
+
+### 6.14 Feature: Retention and Deletion Policies
+
+**Purpose:** Maintain a lean and secure database environment by enforcing strict automated clean-up and purging routines.
+
+**Functional Requirements:**
+- FR-14.1: If a user deletes their account, the system must cascadingly delete their `users`, `oauth_connections`, `user_preferences`, `profile_snapshots`, `developer_profiles`, `blueprints`, and `user_repository_states` records.
+- FR-14.2: OAuth credentials must be entirely purged immediately upon a disconnect or revocation request.
+- FR-14.3: Analytics events and transient background jobs must be purged on a defined window (e.g., 90 days for analytics, 7 days for completed background jobs).
+- FR-14.4: AI logs (`ai_runs`) and developer profile analysis caches must be auto-pruned after 30 days to limit database bloating.
+- FR-14.5: Audit logs are preserved for 1 year for compliance.
 
 ---
 
@@ -827,24 +891,32 @@ This is not a standalone screen but a set of requirements applied across §6.2, 
 | Reliability | GitHub API rate limiting must be handled gracefully across all features that call it (login, profile analysis, recommendations, opportunities, search) — queue/backoff, never a raw error to the user. |
 | Availability | TBD — no specific uptime target given in MRD; standard hackathon-demo reliability expectations apply. |
 | Accessibility | Not explicitly specified in MRD beyond "accessibility improvements" as a contribution tier; general web accessibility best practices (semantic HTML, keyboard navigation, contrast) should still apply to OpenScout.ai's own UI as good practice, though not an explicit MRD requirement. |
-| Data retention | TBD — no retention/deletion policy specified for user data, analysis caches, or Blueprints. |
+| Data retention | Cascade delete on account removal; OAuth credentials purged on disconnect; AI observability logs purged after 30 days; Background job logs pruned after 7 days; Analytics events pruned after 90 days; Audit logs retained for 1 year. |
 
 ---
 
 ## 9. Data Model Summary
 
-| Table | Purpose |
+| Table / Collection | Purpose |
 |---|---|
-| `users` | Authenticated developer accounts (§6.1) |
-| `developer_profiles` | Inferred skills/experience (§6.2) |
-| `repositories` | Cached GitHub repo metadata + computed scores (§6.3, §6.4) |
-| `repository_analyses` | Cached AI-generated repo summaries (§6.5) |
-| `recommendations` | Per-user ranked, explained recommendations (§6.3) |
-| `contribution_opportunities` | Tiered opportunities per repository (§6.6) |
-| `blueprints` | Generated Contribution Blueprints (§6.7) |
-| `repository_views` | Recency-ordered view history (§6.11) |
-| `saved_repositories` | User-saved-for-later repos (§6.11) |
-| `handoff_events` | Optional Jules handoff logging (§6.8) |
+| `users` | Core authenticated user records (§6.1) |
+| `oauth_connections` | Encrypted access and refresh tokens isolated from user records (§6.1) |
+| `user_preferences` | User-defined profile parameters, skills, stack selections, and settings (§6.1) |
+| `profile_snapshots` | Evidence snapshot backing inferred skill scores and experience assessments (§6.2) |
+| `developer_profiles` | Aggregated developer competency signals and interest categories (§6.2) |
+| `repositories` | Core evaluated open-source repositories indices and activity metrics (§6.3, §6.4) |
+| `repository_analyses` | Commit-specific cached AI summaries, stack details, and scores (§6.5) |
+| `contribution_opportunities` | Actionable tiered open issues and AI low-hanging suggestions (§6.6) |
+| `recommendation_runs` | Run record capturing algorithmic variables for reproducible batches (§6.3) |
+| `recommendations` | Individual matches computed in a recommendation run (§6.3) |
+| `user_repository_states` | Unified state managing saves, views, and dismissed statuses (§6.11) |
+| `blueprints` | Versioned, non-overwriting structured Contribution Blueprints (§6.7) |
+| `handoff_events` | Logs of redirection session handoffs to Google Jules (§6.8) |
+| `background_jobs` | Durable queues tracking execution states, leases, retries, and errors (§6.12) |
+| `ai_runs` | System-wide LLM request monitoring, token accounting, and cost tracking (§6.13) |
+| `analytics_events` | Product interaction funnel tracking (§11) |
+| `audit_logs` | Immutable security audit logs for compliance (§6.14) |
+
 
 Exact schema types, indexes, and migrations are left to engineering; the above defines required entities and relationships only.
 
@@ -865,15 +937,17 @@ Exact schema types, indexes, and migrations are left to engineering; the above d
 | `/api/repositories/:id/analyze` | POST | Force re-analysis |
 | `/api/repositories/:id/analysis-status` | GET | Poll analysis status |
 | `/api/repositories/:id/opportunities` | GET | Tiered contribution opportunities |
-| `/api/repositories/:id/save` | POST/DELETE | Save/unsave repo |
-| `/api/blueprints` | POST | Generate Blueprint |
-| `/api/blueprints/:id` | GET/PATCH | Retrieve/update Blueprint |
-| `/api/blueprints?user_id=me` | GET | List user's Blueprints |
+| `/api/repositories/:id/state` | POST/DELETE/PATCH | Update/query user repository view/save/dismiss state |
+| `/api/blueprints` | POST | Generate Blueprint (v1 or new version under group ID) |
+| `/api/blueprints/:id` | GET | Retrieve a specific Blueprint version |
+| `/api/blueprints/group/:group_id` | GET | List versions of a blueprint group |
+| `/api/blueprints?user_id=me` | GET | List user's latest Blueprints |
 | `/api/blueprints/:id/jules-handoff` | GET | Formatted handoff payload |
 | `/api/dashboard` | GET | Aggregate dashboard data |
 | `/api/search` | GET | Manual repo search |
-| `/api/history/repositories` | GET | Recently viewed |
-| `/api/history/blueprints` | GET | Blueprint history |
+| `/api/history/repositories` | GET | Recently viewed from repository states |
+| `/api/history/blueprints` | GET | Blueprint history (all versions) |
+| `/api/jobs/:id` | GET | Poll background job worker status |
 
 ---
 
@@ -883,15 +957,18 @@ Exact schema types, indexes, and migrations are left to engineering; the above d
 |---|---|
 | `auth_login_started/succeeded/failed`, `auth_logout` | Login lifecycle |
 | `profile_analysis_started/completed/failed` | Profile analysis lifecycle |
-| `recommendations_viewed`, `recommendation_card_clicked`, `recommendation_dismissed`, `recommendations_empty_state_shown` | Recommendation engagement |
+| `recommendation_run_started/completed/failed` | Recommendation run cycle |
+| `recommendations_viewed`, `recommendation_card_clicked`, `recommendation_dismissed` | Recommendation engagement |
 | `repository_filtered_ineligible` | Eligibility filtering (internal/debug) |
 | `repository_opened`, `repository_analysis_triggered/completed/failed/served_from_cache` | Repo detail engagement |
-| `opportunities_viewed`, `opportunity_selected`, `ai_generated_opportunity_shown` | Opportunity engagement |
+| `opportunities_viewed`, `opportunity_selected` | Opportunity engagement |
 | `blueprint_generation_started/completed/failed`, `blueprint_viewed`, `blueprint_reopened_from_history` | Blueprint lifecycle — **primary KPI funnel** |
-| `jules_handoff_initiated` (method: `api`\|`copy`), `jules_handoff_succeeded` (includes `jules_session_id`), `jules_handoff_failed` (includes `error_reason`), `jules_prompt_copied` | Handoff via Jules REST API — **primary KPI completion event** |
+| `jules_handoff_initiated` (method: `api`\|`copy`), `jules_handoff_succeeded` (includes `jules_session_id`), `jules_handoff_failed` (includes `error_reason`) | Handoff via Jules REST API — **primary KPI completion event** |
+| `background_job_queued/started/completed/failed/dead_lettered` | Job worker processing state change |
 | `dashboard_viewed`, `dashboard_load_time` | Dashboard engagement |
 | `search_performed`, `search_result_clicked` | Manual search |
-| `history_viewed`, `repository_saved/unsaved`, `blueprint_reopened` | Saved history |
+| `history_viewed`, `repository_state_updated` | State updates |
+
 
 The **primary KPI** (user reaches Google Jules with a completed Blueprint via API-driven session creation) is measurable as the funnel: `dashboard_viewed → recommendation_card_clicked → repository_analysis_completed → opportunity_selected → blueprint_generation_completed → jules_handoff_succeeded`. The `jules_handoff_succeeded` event confirms that a Jules Session was created via the REST API and the user was redirected. `jules_prompt_copied` tracks fallback usage when the API path is unavailable.
 
@@ -940,7 +1017,7 @@ Consolidated list of every TBD raised in this document, for team triage before/d
 17. History pagination/retention limits (§6.11).
 18. Performance SLA targets (§8).
 19. Uptime/availability target (§8).
-20. Data retention/deletion policy (§8).
+20. Resolved: Data retention/deletion policies are defined in §6.14 and NFR §8.
 
 ---
 

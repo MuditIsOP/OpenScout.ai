@@ -182,13 +182,14 @@ GitHub Login → Profile Analysis → Recommendations → Repo Detail → Bluepr
 
 | Step | Trigger | Backend Service | Data Source | Output |
 |---|---|---|---|---|
-| **1. Login** | User clicks "Continue with GitHub" | Clerk Webhook Handler | Clerk OAuth → GitHub | `users` collection record created |
-| **2. Profile Analysis** | Automatic after first login | `profile_analyzer` | GitHub REST API (repos, languages, commits) | `developer_profiles` collection record |
-| **3. Recommendations** | Dashboard load | `recommendation_engine` | `developer_profiles` + `repositories` (pre-crawled/cached) | Ranked list with match %, confidence, reasons |
-| **4. Repo Detail** | User clicks a recommendation | `repo_analyzer` | GitHub API + LLM (Gemini) | AI summary, tech stack, health signals |
-| **5. Opportunities** | Part of repo detail | `opportunity_discovery` | GitHub Issues API + LLM | 8-tier contribution opportunity list |
-| **6. Blueprint** | User selects an opportunity | `blueprint_generator` | Profile + repo analysis + opportunity + LLM | Structured contribution plan |
-| **7. Jules Handoff** | User clicks "Continue to Google Jules" | `jules_handoff_service` | Jules REST API + Blueprint data | Jules Session created via API → user redirected to `jules.google.com` with context pre-loaded (copy-paste fallback if API unavailable) |
+| **1. Login** | User clicks "Continue with GitHub" | Clerk Webhook Handler | Clerk OAuth → GitHub | `users` and `oauth_connections` (encrypted) records created |
+| **2. Profile Analysis** | Automatic after first login | `profile_analyzer` | GitHub REST API (repos, languages, commits) | `developer_profiles` record + immutable `profile_snapshots` evidence |
+| **3. Recommendations** | Dashboard load | `recommendation_engine` | `developer_profiles` + `repositories` | `recommendation_runs` record + list of `recommendations` |
+| **4. Repo Detail** | User clicks a recommendation | `repo_analyzer` | GitHub API + LLM (Gemini) | Commit-specific `repository_analyses` (by default_branch/commit_sha) |
+| **5. Opportunities** | Part of repo detail | `opportunity_discovery` | GitHub Issues API + LLM | 8-tier opportunities tracking freshness signals |
+| **6. Blueprint** | User selects an opportunity | `blueprint_generator` | Profile + repo analysis + opportunity + LLM | Versioned `blueprints` record (non-overwriting, group-tracked) |
+| **7. Jules Handoff** | User clicks "Continue to Google Jules" | `jules_handoff_service` | Jules REST API + Blueprint data | Jules Session created via API with `idempotency_key` → redirect to `jules.google.com` |
+
 
 ---
 
@@ -365,204 +366,380 @@ Each collection maps to a PRD concept. Below is the schema definition for each c
 ---
 
 #### `users`
-
 **PRD Reference:** §6.1
-**Purpose:** Stores authenticated users synced from Clerk via webhook.
+**Purpose:** Stores authenticated user summaries synced from Clerk via webhook.
 
 | Field | Type | Description |
 |---|---|---|
+| `id` | UUID (string) | Primary key |
 | `clerk_id` | string (unique) | Clerk's internal user ID |
-| `github_id` | string (unique) | GitHub user ID from OAuth |
+| `github_id` | string (unique) | GitHub user ID |
 | `github_username` | string | GitHub login handle |
 | `avatar_url` | string | Profile image URL |
 | `created_at` | datetime | Account creation timestamp |
 | `last_login_at` | datetime | Most recent sign-in |
-| `profile_analysis_status` | enum: `pending`, `running`, `complete`, `failed` | Current state of profile analysis |
+
+---
+
+#### `oauth_connections`
+**PRD Reference:** §6.1
+**Purpose:** Encrypted OAuth access and refresh credentials, isolated from primary user records.
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | UUID (string) | Primary key |
+| `user_id` | string (FK → users) | Reference to the user |
+| `provider` | string | Authentication provider (e.g. `github`) |
+| `access_token` | string (encrypted) | AES-256 encrypted access token |
+| `refresh_token` | string (encrypted) | AES-256 encrypted refresh token |
+| `scopes` | array of strings | Permitted scopes list |
+| `token_status` | string | Token validity (e.g. `active`, `revoked`) |
+| `key_rotation_metadata` | object | Rotation logs (`last_rotated`, `next_rotation_due`) |
+| `created_at` | datetime | Record creation time |
+| `updated_at` | datetime | Record last update time |
+
+---
+
+#### `user_preferences`
+**PRD Reference:** §6.1
+**Purpose:** Developer profile fallbacks (for empty profiles) and settings.
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | UUID (string) | Primary key |
+| `user_id` | string (FK → users, unique) | Reference to the user |
+| `skills` | array of strings | Manually selected/inferred skills |
+| `languages` | array of strings | Manually selected languages |
+| `frameworks` | array of strings | Manually selected frameworks |
+| `interests` | array of strings | Preferred domains/topics |
+| `contribution_preferences` | array of strings | Preferred contribution types |
+| `difficulty_preference` | string | Preferred difficulty (`beginner`/`intermediate`/`advanced`) |
+| `jules_api_key` | string (encrypted) | AES-256 encrypted Jules API key |
+| `created_at` | datetime | Record creation time |
+| `updated_at` | datetime | Record last update time |
 
 ---
 
 #### `developer_profiles`
-
 **PRD Reference:** §6.2
-**Purpose:** AI-inferred developer skill profile derived from GitHub activity.
+**Purpose:** Active aggregated developer skill profile.
 
 | Field | Type | Description |
 |---|---|---|
-| `user_id` | string (unique, FK → users) | Reference to the user |
-| `languages` | array of `{name, weight, confidence}` | Detected programming languages with proficiency signals |
-| `frameworks` | array of `{name, weight, confidence}` | Detected frameworks/libraries |
-| `topics` | array of strings | Interest areas inferred from repos |
-| `experience_level` | enum: `beginner`, `intermediate`, `advanced` | Overall experience classification |
-| `experience_confidence` | float (0–1) | Confidence in the experience classification |
-| `contribution_history` | object | Stats on past PRs, issues, commits to external repos |
-| `project_domains` | array of strings | Inferred domain expertise (web, ML, mobile, etc.) |
-| `last_analyzed_at` | datetime | When the profile was last analyzed |
+| `id` | UUID (string) | Primary key |
+| `user_id` | string (FK → users, unique) | Reference to the user |
+| `experience_level` | string | Classification (`beginner`/`intermediate`/`advanced`) |
+| `experience_confidence` | float (0-1) | Confidence in classification |
+| `contribution_history_summary`| object | Inferred stats from past repositories |
+| `project_domains` | array of strings | Inferred domain expertises |
+| `last_analyzed_at` | datetime | Last analysis timestamp |
+| `analysis_version` | string | Evaluator logic version |
+
+---
+
+#### `profile_snapshots`
+**PRD Reference:** §6.2
+**Purpose:** Immutable snapshots of inferred skills and raw evidence.
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | UUID (string) | Primary key |
+| `user_id` | string (FK → users) | Reference to the user |
+| `developer_profile_id` | string (FK → developer_profiles) | Reference to the profile |
+| `inferred_skills` | object (JSON) | Captured skill weights & confidence details |
+| `source_evidence` | object (JSON) | Raw GitHub commit frequencies, PR links, repository data |
+| `scoring_rationale` | string | Explanatory rationale behind inference scoring |
+| `created_at` | datetime | Snapshot creation timestamp |
 
 ---
 
 #### `repositories`
-
 **PRD Reference:** §6.3, §6.4
-**Purpose:** Cached repository metadata with eligibility status.
+**Purpose:** Cached repository index and quality scoring metrics.
 
 | Field | Type | Description |
 |---|---|---|
-| `github_repo_id` | string (unique) | GitHub's numeric repo ID |
-| `full_name` | string | `owner/repo` format |
-| `description` | string | Repository description |
-| `primary_language` | string | Dominant programming language |
-| `topics` | array of strings | GitHub topic tags |
-| `stars` | integer | Star count |
-| `forks` | integer | Fork count |
-| `open_issues_count` | integer | Number of open issues |
-| `last_commit_at` | datetime | Most recent commit timestamp |
-| `license` | string | SPDX license identifier |
-| `is_fork` | boolean | Whether this repo is a fork |
-| `is_archived` | boolean | Whether this repo is archived |
-| `health_score` | float (0–100) | Composite repository health metric |
-| `beginner_friendly_score` | float (0–100) | How welcoming the repo is to new contributors |
-| `doc_quality_score` | float (0–100) | Documentation completeness and quality |
-| `size_kb` | integer | Repository size |
-| `eligibility_status` | enum: `eligible`, `ineligible` | Whether the repo passes the quality gate |
-| `eligibility_reasons` | array of strings | Why the repo was marked ineligible (if applicable) |
-| `cached_at` | datetime | When this data was last refreshed |
+| `id` | UUID (string) | Primary key |
+| `github_repo_id` | integer (unique) | GitHub's numeric repository ID |
+| `full_name` | string (unique) | `owner/repo` format name |
+| `description` | string | Summary metadata from GitHub |
+| `primary_language` | string | Dominant language |
+| `topics` | array of strings | Topic categories |
+| `stars` | integer | Stars count |
+| `forks` | integer | Forks count |
+| `open_issues_count` | integer | Issues count |
+| `last_commit_at` | datetime | Last push activity time |
+| `license` | string | License tag |
+| `is_fork` | boolean | Is fork indicator |
+| `is_archived` | boolean | Is archived indicator |
+| `health_score` | float (0-100) | Calculated community health metric |
+| `beginner_friendly_score` | float (0-100) | Calculated onboarding index |
+| `doc_quality_score` | float (0-100) | Calculated documentation index |
+| `size_kb` | integer | Size in kilobytes |
+| `eligibility_status` | string | Quality gate filter (`eligible`/`ineligible`) |
+| `eligibility_reasons` | array of strings | Filter validation messages |
+| `cached_at` | datetime | Cache record timestamp |
 
 ---
 
 #### `repository_analyses`
-
 **PRD Reference:** §6.5
-**Purpose:** AI-generated repository analysis (summary, tech stack, community health).
+**Purpose:** Commit-specific cached repository analysis.
 
 | Field | Type | Description |
 |---|---|---|
+| `id` | UUID (string) | Primary key |
 | `repository_id` | string (FK → repositories) | Reference to the repository |
-| `summary_text` | string | AI-generated plain-English summary |
-| `tech_stack` | array of strings | Identified technologies and tools |
-| `activity_summary` | string | Commit frequency, PR velocity, issue responsiveness |
-| `community_summary` | string | Contributor diversity, maintainer responsiveness |
-| `contribution_friendliness_score` | float (0–100) | How easy it is for new contributors to get started |
-| `onboarding_difficulty` | enum: `easy`, `moderate`, `hard` | Expected difficulty for first-timers |
-| `confidence_score` | float (0–1) | AI confidence in this analysis |
-| `analyzed_at` | datetime | When the analysis was generated |
-
----
-
-#### `recommendations`
-
-**PRD Reference:** §6.3
-**Purpose:** Personalized repository recommendations with match scores and explanations.
-
-| Field | Type | Description |
-|---|---|---|
-| `user_id` | string (FK → users) | Reference to the user |
-| `repository_id` | string (FK → repositories) | Reference to the recommended repository |
-| `match_score` | float (0–100) | How well the repo matches the user's profile |
-| `confidence_score` | float (0–1) | AI confidence in this recommendation |
-| `reasons` | array of strings | Human-readable explanations for why this repo was recommended |
-| `generated_at` | datetime | When the recommendation was computed |
-| `status` | enum: `active`, `dismissed`, `saved` | User's action on this recommendation |
+| `default_branch` | string | Target branch analyzed |
+| `commit_sha` | string | Target Git commit SHA |
+| `analysis_version` | string | AI Analyzer logic version |
+| `summary_text` | string | AI repository description |
+| `tech_stack` | array of strings | Identified languages/tools |
+| `activity_summary` | string | Inferred PR/commit activity description |
+| `community_summary` | string | Contributor friendliness description |
+| `contribution_friendliness_score` | float (0-100) | AI score |
+| `onboarding_difficulty` | string | Estimated difficulty (`easy`/`moderate`/`hard`) |
+| `confidence_score` | float (0-1) | AI summary confidence |
+| `analyzed_at` | datetime | Generation timestamp |
+| `cache_invalidated_at` | datetime (nullable)| Invalidation timestamp |
 
 ---
 
 #### `contribution_opportunities`
-
 **PRD Reference:** §6.6
-**Purpose:** Tiered contribution opportunities within a repository.
+**Purpose:** Tiered contribution opportunities including issue details.
 
 | Field | Type | Description |
 |---|---|---|
+| `id` | UUID (string) | Primary key |
 | `repository_id` | string (FK → repositories) | Reference to the repository |
-| `tier` | integer (1–8) | Opportunity difficulty tier (1 = easiest) |
-| `source_type` | string | Where the opportunity was found (issue, README, tests, docs, etc.) |
-| `github_issue_url` | string (nullable) | Link to the GitHub issue, if applicable |
-| `title` | string | Short description of the opportunity |
-| `description` | string | Detailed explanation of what to do |
-| `confidence_score` | float (0–1) | AI confidence in this opportunity |
-| `estimated_difficulty` | enum: `easy`, `moderate`, `hard` | Expected effort level |
+| `repository_commit_sha` | string | Commit SHA opportunity was identified on |
+| `tier` | integer (1-8) | Prioritized tier level |
+| `source_type` | string | Opportunity source (`github_issue`/`ai_generated`) |
+| `github_issue_number` | integer (nullable) | Issue number on GitHub |
+| `github_issue_url` | string (nullable) | Link to issue |
+| `current_issue_state` | string (nullable) | Issue status (`open`/`closed`) |
+| `assignees` | array of strings | Assigned GitHub users |
+| `linked_pull_requests` | array of strings | Linked PR URLs |
+| `title` | string | Opportunity name |
+| `description` | string | Detailed guide or issue description |
+| `confidence_score` | float (nullable) | Required for Tier 8 |
+| `estimated_difficulty` | string | Difficulty (`easy`/`moderate`/`hard`) |
+| `last_issue_activity` | datetime (nullable)| Timestamp from GitHub |
+| `last_verification_time` | datetime | Timestamp of validation |
+| `expiration_time` | datetime (nullable)| Expiry window of opportunity |
+| `relevant_verified_file_paths` | array of strings | File paths to modify |
+| `is_possibly_claimed` | boolean | Claims warning flag |
+| `created_at` | datetime | Opportunity discovery timestamp |
+
+---
+
+#### `recommendation_runs`
+**PRD Reference:** §6.3
+**Purpose:** Parameterized runs for reproducible recommendation batches.
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | UUID (string) | Primary key |
+| `user_id` | string (FK → users) | Target user |
+| `profile_snapshot_id` | string (FK → profile_snapshots) | Snapshot used |
+| `scoring_algorithm_version` | string | Algorithm ruleset |
+| `filters_applied` | object (JSON) | Scope configuration |
+| `candidates_evaluated_count` | integer | Candidate pools size |
+| `idempotency_key` | string (unique) | Idempotency tag |
+| `created_at` | datetime | Run timestamp |
+
+---
+
+#### `recommendations`
+**PRD Reference:** §6.3
+**Purpose:** Individual Match records linked to a run.
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | UUID (string) | Primary key |
+| `recommendation_run_id` | string (FK → recommendation_runs) | Reference to run parent |
+| `user_id` | string (FK → users) | Reference to user |
+| `repository_id` | string (FK → repositories) | Reference to repository |
+| `match_score` | float (0-100) | Similarity score |
+| `confidence_score` | float (0-1) | AI calculation confidence |
+| `reasons` | array of strings | Explained rationale factors |
+| `created_at` | datetime | Creation timestamp |
+
+---
+
+#### `user_repository_states`
+**PRD Reference:** §6.11
+**Purpose:** Consolidated tracker for saves, views, and dismissals.
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | UUID (string) | Primary key |
+| `user_id` | string (FK → users) | Reference to user |
+| `repository_id` | string (FK → repositories) | Reference to repository |
+| `is_saved` | boolean | Saved for later flag |
+| `saved_at` | datetime (nullable)| Save timestamp |
+| `is_viewed` | boolean | Recently viewed flag |
+| `last_viewed_at` | datetime (nullable)| View timestamp |
+| `recommendation_state` | string | Status (`active`/`dismissed`/`completed`) |
+| `created_at` | datetime | Record created timestamp |
+| `updated_at` | datetime | Record updated timestamp |
 
 ---
 
 #### `blueprints`
-
 **PRD Reference:** §6.7
-**Purpose:** Structured Contribution Blueprints — the core deliverable of OpenScout.ai.
+**Purpose:** Versioned structured onboarding Contribution Blueprints.
 
 | Field | Type | Description |
 |---|---|---|
-| `user_id` | string (FK → users) | Reference to the user |
-| `repository_id` | string (FK → repositories) | Reference to the target repository |
-| `opportunity_id` | string (FK → contribution_opportunities) | The specific opportunity this blueprint addresses |
-| `repository_understanding` | string | AI's explanation of what the repository does |
-| `match_explanation` | string | Why this opportunity fits this developer |
-| `confidence_level` | float (0–1) | AI confidence in this blueprint |
-| `estimated_difficulty` | enum: `easy`, `moderate`, `hard` | Expected implementation difficulty |
-| `estimated_effort` | string | Time estimate (e.g., "2–4 hours") |
-| `learning_objectives` | array of strings | What the developer will learn |
-| `constraints` | array of strings | Important constraints or gotchas |
-| `suggested_reading_order` | array of `{file, reason}` | Files to read before starting, in order |
-| `implementation_strategy` | string | Step-by-step approach to the contribution |
-| `final_jules_prompt` | string | Pre-formatted prompt ready for Google Jules — sent to the Jules REST API when creating a Session, or displayed for copy-paste as fallback |
-| `status` | enum: `generating`, `complete`, `failed` | Blueprint generation status |
-| `created_at` | datetime | When the blueprint was initiated |
-
----
-
-#### `repository_views`
-
-**PRD Reference:** §6.11
-**Purpose:** Tracks recently viewed repositories for the history page.
-
-| Field | Type | Description |
-|---|---|---|
-| `user_id` | string (FK → users) | Reference to the user |
-| `repository_id` | string (FK → repositories) | Reference to the viewed repository |
-| `viewed_at` | datetime | When the user viewed the repository |
-
----
-
-#### `saved_repositories`
-
-**PRD Reference:** §6.11
-**Purpose:** Repositories the user explicitly saved for later.
-
-| Field | Type | Description |
-|---|---|---|
-| `user_id` | string (FK → users) | Part of compound unique key |
-| `repository_id` | string (FK → repositories) | Part of compound unique key |
-| `saved_at` | datetime | When the user saved the repository |
+| `id` | UUID (string) | Primary key |
+| `blueprint_group_id` | UUID (string) | ID of the grouping for this blueprint |
+| `version` | integer | Incremented version number |
+| `supersedes_blueprint_id` | string (FK → blueprints, nullable) | Reference to previous version |
+| `user_id` | string (FK → users) | Reference to user |
+| `repository_id` | string (FK → repositories) | Reference to repository |
+| `repository_commit_sha` | string | Commit SHA blueprint was generated on |
+| `opportunity_id` | string (FK → contribution_opportunities) | Target opportunity |
+| `prompt_version` | string | Prompt version used |
+| `output_schema_version` | string | LLM output schema version |
+| `repository_understanding` | string | AI understanding description |
+| `match_explanation` | string | Explanatory match message |
+| `confidence_level` | float (0-1) | AI calculation confidence |
+| `estimated_difficulty` | string | Difficulty (`easy`/`moderate`/`hard`) |
+| `estimated_effort` | string | Time estimate (e.g. `2-4 hours`) |
+| `learning_objectives` | array of strings | Learning takeaways |
+| `constraints` | array of strings | Gotchas/constraints list |
+| `suggested_reading_order` | array of objects | Files to read `{file, reason}` |
+| `implementation_strategy` | string | AI action plan |
+| `final_jules_prompt` | string | Formatted context prompt |
+| `idempotency_key` | string (unique) | Idempotency tag |
+| `status` | string | Status (`generating`/`complete`/`failed`) |
+| `created_at` | datetime | Timestamp |
 
 ---
 
 #### `handoff_events`
-
 **PRD Reference:** §6.8
-**Purpose:** Tracks when and how users handed off blueprints to Google Jules via the Jules REST API (or copy-paste fallback).
+**Purpose:** Tracker logs for session redirects/clipboard fallback actions.
 
 | Field | Type | Description |
 |---|---|---|
-| `blueprint_id` | string (FK → blueprints) | Reference to the blueprint |
-| `method` | enum: `api`, `copy` | How the user initiated the handoff — `api` for Jules REST API session creation, `copy` for clipboard fallback |
-| `jules_session_id` | string (nullable) | The Jules Session ID returned by the API (null for `copy` method) |
-| `jules_session_url` | string (nullable) | The URL to the created Jules Session (null for `copy` method) |
-| `error_reason` | string (nullable) | If the API path failed, the reason (e.g., "api_key_missing", "repo_not_connected", "api_error") |
-| `initiated_at` | datetime | When the handoff occurred |
+| `id` | UUID (string) | Primary key |
+| `blueprint_id` | string (FK → blueprints) | Source blueprint |
+| `method` | string | Handoff mode (`api`/`copy`) |
+| `jules_session_id` | string (nullable) | Created session identifier |
+| `jules_session_url` | string (nullable) | Created session redirect link |
+| `error_reason` | string (nullable) | Error message if failed |
+| `idempotency_key` | string (unique) | Idempotency tag |
+| `initiated_at` | datetime | Creation timestamp |
 
 ---
 
+#### `background_jobs`
+**PRD Reference:** §6.12
+**Purpose:** Durable queues for async profile/repository processing.
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | UUID (string) | Primary key |
+| `job_type` | string | Task type (`profile_analysis`/`repo_analysis` etc.) |
+| `status` | string | Status (`queued`/`running`/`completed`/`failed`/`dead_letter`) |
+| `retries` | integer | Max retry count |
+| `attempt_count` | integer | Executed attempt count |
+| `idempotency_key` | string (unique) | Idempotency key |
+| `worker_lease` | string (nullable) | Claimed worker lease tag |
+| `timeout` | integer | Timeout threshold in seconds |
+| `dead_letter_state` | object (JSON) | Fail reasons logs |
+| `payload` | object (JSON) | Worker parameters configuration |
+| `created_at` | datetime | Queue timestamp |
+| `updated_at` | datetime | State update timestamp |
+
+---
+
+#### `ai_runs`
+**PRD Reference:** §6.13
+**Purpose:** Observability and prompt auditing tracking.
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | UUID (string) | Primary key |
+| `provider` | string | Provider (`gemini`/`openai`) |
+| `model` | string | Model name |
+| `prompt_version` | string | Prompts rules version |
+| `output_schema_version` | string | Schema parser version |
+| `token_usage` | object (JSON) | Input/output token counters |
+| `latency_ms` | integer | Call latency in milliseconds |
+| `validation_failure` | boolean | Validation check failure |
+| `fallback_provider_usage`| boolean | Fallback flag |
+| `grounding_evidence_hash`| string | SHA-256 hash of grounding evidence |
+| `estimated_cost` | float | Token cost calculated |
+| `created_at` | datetime | Record timestamp |
+
+---
+
+#### `analytics_events`
+**PRD Reference:** §11
+**Purpose:** Tracking KPI funnels.
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | UUID (string) | Primary key |
+| `user_id` | string (FK → users, nullable) | Reference to user |
+| `event_name` | string | Tracked metric name |
+| `payload` | object (JSON) | Analytics metrics |
+| `created_at` | datetime | Log time |
+
+---
+
+#### `audit_logs`
+**PRD Reference:** §6.14
+**Purpose:** Immutable records of security actions.
+
+| Field | Type | Description |
+|---|---|---|
+| `id` | UUID (string) | Primary key |
+| `user_id` | string (FK → users, nullable) | Reference to user |
+| `action` | string | Executed task name |
+| `resource_type` | string | Object modified category |
+| `resource_id` | string (nullable) | Object modified key |
+| `ip_address` | string (nullable) | Source IP |
+| `user_agent` | string (nullable) | Source client agent string |
+| `payload` | object (JSON) | Details logs |
+| `created_at` | datetime | Execution timestamp |
+
+
 ### 6.4 Index Strategy
 
-| Collection | Index | Type | Purpose |
+| Collection / Table | Index | Type | Purpose |
 |---|---|---|---|
 | `users` | `clerk_id` | Unique | Fast lookup by Clerk ID |
 | `users` | `github_id` | Unique | Fast lookup by GitHub ID |
+| `oauth_connections` | `user_id` | Standard | Retrieve encrypted credentials for a user |
+| `oauth_connections` | `(user_id, provider)` | Unique | Restrict connection per provider per user |
+| `user_preferences` | `user_id` | Unique | One preference record per user |
 | `developer_profiles` | `user_id` | Unique | One profile per user |
-| `repositories` | `github_repo_id` | Unique | Deduplication and fast lookup |
-| `repositories` | `eligibility_status` | Standard | Filter eligible repos for recommendations |
-| `recommendations` | `(user_id, match_score DESC)` | Compound | Dashboard query: user's recommendations sorted by relevance |
+| `profile_snapshots` | `user_id` | Standard | Retrieve evidence snapshots for user reviews |
+| `repositories` | `github_repo_id` | Unique | Deduplication and lookup by GitHub ID |
+| `repositories` | `full_name` | Unique | Lookup by owner/name |
+| `repositories` | `eligibility_status` | Standard | Filter eligible repositories for crawler engine |
+| `repository_analyses` | `(repository_id, commit_sha, analysis_version)` | Compound Unique | Cache key matching repo, commit, and AI version |
+| `contribution_opportunities`| `repository_id` | Standard | Fetch opportunities list for detail page |
+| `contribution_opportunities`| `(repository_id, tier, current_issue_state)` | Compound | Filter open opportunities by tier |
+| `recommendation_runs` | `user_id` | Standard | Fetch recommendation run list |
+| `recommendations` | `(user_id, match_score DESC)` | Compound | Dashboard query: user matches sorted by relevance |
+| `recommendations` | `recommendation_run_id` | Standard | Fetch match pool for run |
+| `user_repository_states` | `(user_id, repository_id)` | Compound Unique | Prevent duplicate entries |
+| `user_repository_states` | `user_id` (filtered is_saved = true) | Partial Index | Fetch user's saved bookmarks |
+| `user_repository_states` | `(user_id, last_viewed_at DESC)` (filtered is_viewed = true) | Partial Index | Fetch user's view history |
 | `blueprints` | `user_id` | Standard | List user's blueprints |
-| `repository_views` | `(user_id, viewed_at DESC)` | Compound | History query: recently viewed |
-| `saved_repositories` | `(user_id, repository_id)` | Compound Unique | Prevent duplicate saves |
+| `blueprints` | `(blueprint_group_id, version DESC)` | Compound | Query versions in reverse order |
+| `handoff_events` | `blueprint_id` | Standard | Session redirected log auditing |
+| `background_jobs` | `(status, created_at)` (filtered status: queued/failed) | Partial Index | Poll workers task retrieval |
+| `ai_runs` | `(provider, model, latency_ms)` | Compound | Audit metrics query |
+| `analytics_events` | `(event_name, created_at)` | Compound | Analytics funnel aggregation query |
+| `audit_logs` | `(user_id, action, created_at)` | Compound | Audit compliance logging lookups |
+
 
 ---
 
@@ -617,11 +794,11 @@ Webhook payloads are verified using the **svix** library to ensure they originat
 
 ### 7.4 GitHub Token Retrieval
 
-Clerk stores the user's GitHub OAuth access token. The backend retrieves it via Clerk's Backend API (`/v1/users/{clerk_user_id}/oauth_access_tokens/oauth_github`) to make GitHub API calls on behalf of the user. This means:
+The backend retrieves the user's GitHub OAuth credentials from the `oauth_connections` collection:
+- During webhook sync on first login, access and refresh tokens are retrieved from Clerk and stored encrypted at rest in `oauth_connections`.
+- Background workers and API routes fetch and decrypt these tokens from `oauth_connections` to make authenticated GitHub requests.
+- Token refresh flow uses stored refresh tokens or triggers updates via Clerk SDK, updating the `oauth_connections` store with the new keys.
 
-- The backend never stores GitHub tokens directly.
-- Token refresh is handled by Clerk.
-- The user's GitHub permissions are managed through Clerk's OAuth configuration.
 
 ### 7.5 JWT Verification (Backend)
 
@@ -994,7 +1171,7 @@ main              ← production-ready code
 
 | Concern | Mitigation |
 |---|---|
-| GitHub token storage | Backend never persists GitHub OAuth tokens. Retrieved on-demand from Clerk's API per request |
+| GitHub token storage | Stored encrypted in the `oauth_connections` collection using AES-256-GCM. Isolated entirely from `users` records and primary user APIs. |
 | Database access | MongoDB Atlas uses TLS encryption in transit, encryption at rest, and IP whitelisting |
 | Secrets management | All secrets stored in environment variables, never committed to the repository. `.env.example` contains only placeholder values |
 
@@ -1006,6 +1183,11 @@ main              ← production-ready code
 | Rate limiting | GitHub API rate limits managed by the backend's rate limiter module (exponential backoff, quota tracking) |
 | Input validation | All request bodies validated by Pydantic models before reaching business logic |
 
+### 14.4 Token Security & Isolation
+- Encrypted credentials (such as access tokens and refresh tokens) reside in `oauth_connections` to limit leakage vector should a user record or user profile API get compromised.
+- Decryption keys are stored strictly in backend server environment variables (`ENCRYPTION_KEY`), and decrypted values are never transmitted to the frontend.
+
+
 ---
 
 ## 15. Performance & Scalability
@@ -1015,9 +1197,10 @@ main              ← production-ready code
 | What | Where | TTL | Invalidation |
 |---|---|---|---|
 | Repository metadata | MongoDB (`repositories` collection) | 24 hours | On manual re-analysis |
-| Repository analysis | MongoDB (`repository_analyses` collection) | 24 hours | On manual re-analysis |
+| Repository analysis | MongoDB (`repository_analyses` collection) | 24 hours | On manual re-analysis or default branch / commit SHA updates. Keyed on `repository_id + commit_sha + analysis_version`. |
 | Clerk JWKS | In-memory (backend process) | Indefinite (until restart) | Server restart |
 | Developer profile | MongoDB (`developer_profiles` collection) | Until re-analysis | On manual re-analysis |
+
 
 ### 15.2 Performance Targets
 

@@ -442,99 +442,272 @@ graph TD
 
 ```mermaid
 erDiagram
-    users ||--o| developer_profiles : "has one"
-    users ||--o{ recommendations : "receives many"
-    users ||--o{ blueprints : "creates many"
-    users ||--o{ repository_views : "views many"
-    users ||--o{ saved_repositories : "saves many"
-    
-    repositories ||--o| repository_analyses : "has one"
-    repositories ||--o{ contribution_opportunities : "has many"
-    repositories ||--o{ recommendations : "recommended in"
-    repositories ||--o{ blueprints : "targeted by"
-    repositories ||--o{ repository_views : "viewed in"
-    repositories ||--o{ saved_repositories : "saved in"
-    
-    contribution_opportunities ||--o{ blueprints : "addressed by"
-    blueprints ||--o{ handoff_events : "handed off via"
+    users ||--o{ oauth_connections : "has credentials"
+    users ||--o| user_preferences : "defines settings"
+    users ||--o| developer_profiles : "possesses profile"
+    users ||--o{ profile_snapshots : "records skill evidence"
+    users ||--o{ recommendation_runs : "triggers evaluations"
+    users ||--o{ recommendations : "receives matches"
+    users ||--o{ user_repository_states : "maintains views and saves"
+    users ||--o{ blueprints : "generates outlines"
+    users ||--o{ analytics_events : "emits tracking"
+    users ||--o{ audit_logs : "records actions"
+
+    developer_profiles ||--o{ profile_snapshots : "backed by snapshots"
+    profile_snapshots ||--o{ recommendation_runs : "parameterizes runs"
+    recommendation_runs ||--o{ recommendations : "produces matching pools"
+
+    repositories ||--o{ repository_analyses : "contains evaluations"
+    repositories ||--o{ contribution_opportunities : "contains issue lists"
+    repositories ||--o{ recommendations : "targeted in runs"
+    repositories ||--o{ user_repository_states : "state track target"
+    repositories ||--o{ blueprints : "outlined for"
+
+    contribution_opportunities ||--o{ blueprints : "satisfies details"
+    blueprints ||--o{ handoff_events : "launches sessions"
+    blueprints ||--o| blueprints : "supersedes versions"
 
     users {
+        uuid id PK
         string clerk_id UK
         string github_id UK
         string github_username
         string avatar_url
-        string jules_api_key
-        enum profile_analysis_status
         datetime created_at
         datetime last_login_at
     }
 
-    developer_profiles {
-        string user_id FK
+    oauth_connections {
+        uuid id PK
+        uuid user_id FK
+        string provider
+        string access_token
+        string refresh_token
+        array scopes
+        string token_status
+        object key_rotation_metadata
+        datetime created_at
+        datetime updated_at
+    }
+
+    user_preferences {
+        uuid id PK
+        uuid user_id FK "unique"
+        array skills
         array languages
         array frameworks
-        enum experience_level
+        array interests
+        array contribution_preferences
+        string difficulty_preference
+        string jules_api_key
+        datetime created_at
+        datetime updated_at
+    }
+
+    developer_profiles {
+        uuid id PK
+        uuid user_id FK "unique"
+        string experience_level
         float experience_confidence
+        object contribution_history_summary
         array project_domains
         datetime last_analyzed_at
+        string analysis_version
+    }
+
+    profile_snapshots {
+        uuid id PK
+        uuid user_id FK
+        uuid developer_profile_id FK
+        object inferred_skills
+        object source_evidence
+        string scoring_rationale
+        datetime created_at
     }
 
     repositories {
-        string github_repo_id UK
-        string full_name
+        uuid id PK
+        integer github_repo_id UK
+        string full_name UK
+        string description
         string primary_language
+        array topics
         integer stars
+        integer forks
+        integer open_issues_count
+        datetime last_commit_at
+        string license
+        boolean is_fork
+        boolean is_archived
         float health_score
         float beginner_friendly_score
-        enum eligibility_status
+        float doc_quality_score
+        integer size_kb
+        string eligibility_status
+        array eligibility_reasons
         datetime cached_at
     }
 
     repository_analyses {
-        string repository_id FK
+        uuid id PK
+        uuid repository_id FK
+        string default_branch
+        string commit_sha
+        string analysis_version
         string summary_text
         array tech_stack
+        string activity_summary
+        string community_summary
         float contribution_friendliness_score
+        string onboarding_difficulty
         float confidence_score
         datetime analyzed_at
-    }
-
-    recommendations {
-        string user_id FK
-        string repository_id FK
-        float match_score
-        float confidence_score
-        array reasons
-        enum status
+        datetime cache_invalidated_at
     }
 
     contribution_opportunities {
-        string repository_id FK
+        uuid id PK
+        uuid repository_id FK
+        string repository_commit_sha
         integer tier
         string source_type
+        integer github_issue_number
+        string github_issue_url
+        string current_issue_state
+        array assignees
+        array linked_pull_requests
         string title
         string description
         float confidence_score
+        string estimated_difficulty
+        datetime last_issue_activity
+        datetime last_verification_time
+        datetime expiration_time
+        array relevant_verified_file_paths
+        boolean is_possibly_claimed
+        datetime created_at
+    }
+
+    recommendation_runs {
+        uuid id PK
+        uuid user_id FK
+        uuid profile_snapshot_id FK
+        string scoring_algorithm_version
+        object filters_applied
+        integer candidates_evaluated_count
+        string idempotency_key UK
+        datetime created_at
+    }
+
+    recommendations {
+        uuid id PK
+        uuid recommendation_run_id FK
+        uuid user_id FK
+        uuid repository_id FK
+        float match_score
+        float confidence_score
+        array reasons
+        datetime created_at
+    }
+
+    user_repository_states {
+        uuid id PK
+        uuid user_id FK
+        uuid repository_id FK
+        boolean is_saved
+        datetime saved_at
+        boolean is_viewed
+        datetime last_viewed_at
+        string recommendation_state
+        datetime created_at
+        datetime updated_at
     }
 
     blueprints {
-        string user_id FK
-        string repository_id FK
-        string opportunity_id FK
+        uuid id PK
+        uuid blueprint_group_id
+        integer version
+        uuid supersedes_blueprint_id FK
+        uuid user_id FK
+        uuid repository_id FK
+        string repository_commit_sha
+        uuid opportunity_id FK
+        string prompt_version
+        string output_schema_version
         string repository_understanding
         string match_explanation
+        float confidence_level
+        string estimated_difficulty
+        string estimated_effort
+        array learning_objectives
+        array constraints
+        object suggested_reading_order
         string implementation_strategy
         string final_jules_prompt
-        enum status
+        string idempotency_key UK
+        string status
+        datetime created_at
     }
 
     handoff_events {
-        string blueprint_id FK
-        enum method
+        uuid id PK
+        uuid blueprint_id FK
+        string method
         string jules_session_id
         string jules_session_url
         string error_reason
+        string idempotency_key UK
         datetime initiated_at
+    }
+
+    background_jobs {
+        uuid id PK
+        string job_type
+        string status
+        integer retries
+        integer attempt_count
+        string idempotency_key UK
+        string worker_lease
+        integer timeout
+        object dead_letter_state
+        object payload
+        datetime created_at
+        datetime updated_at
+    }
+
+    ai_runs {
+        uuid id PK
+        string provider
+        string model
+        string prompt_version
+        string output_schema_version
+        object token_usage
+        integer latency_ms
+        boolean validation_failure
+        boolean fallback_provider_usage
+        string grounding_evidence_hash
+        float estimated_cost
+        datetime created_at
+    }
+
+    analytics_events {
+        uuid id PK
+        uuid user_id FK
+        string event_name
+        object payload
+        datetime created_at
+    }
+
+    audit_logs {
+        uuid id PK
+        uuid user_id FK
+        string action
+        string resource_type
+        string resource_id
+        string ip_address
+        string user_agent
+        object payload
+        datetime created_at
     }
 ```
 
