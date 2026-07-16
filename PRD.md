@@ -106,7 +106,7 @@ The recommendation engine, Blueprint tone, and UI copy must **optimize primarily
 6. On-open repository analysis (cached, lazy-triggered)
 7. Contribution opportunity discovery, prioritized per the MRD's 8-tier strategy
 8. Contribution Blueprint generation
-9. Handoff to Google Jules (embedded if feasible; link/prompt handoff as fallback)
+9. Handoff to Google Jules (API-driven session creation via the Jules REST API)
 10. Personalization-forward dashboard/homepage
 11. Manual search (secondary to recommendations)
 12. Saved history (recent repos, reopenable Blueprints, saved-for-later repos)
@@ -121,9 +121,9 @@ Explicitly excluded, per MRD §22 and planning context:
 - AI replacing Google Jules
 - Any guarantee that AI-generated suggestions are correct — developers remain responsible for review, testing, and submission
 
-### 4.3 Preferred vs. Fallback Experience
-- **Preferred:** Google Jules embedded directly in the OpenScout.ai flow.
-- **Hackathon fallback:** Smooth handoff via the generated Contribution Blueprint (deep link or copy-ready prompt package) if embedding is not feasible within the hackathon timeline. See §6.8 for both implementation paths.
+### 4.3 Integration Strategy — Jules Handoff
+- **Primary path (API-driven):** The OpenScout.ai backend creates a Jules Session via the Jules REST API, pre-loading the Blueprint's `final_jules_prompt` as context. The user is then redirected to the session on `jules.google.com` where all context is already loaded — zero manual re-entry required.
+- **Graceful degradation:** If the Jules API is unreachable or the user hasn't configured their Jules API key, the prompt is displayed in a polished, copy-to-clipboard block so the user can manually paste it into Jules. This is designed as a deliberate, finished experience — not a broken fallback. See §6.8 for full details.
 
 ---
 
@@ -541,7 +541,7 @@ Each feature below includes functional requirements, user stories, acceptance cr
 
 **Acceptance Criteria**
 - Given a user selects a contribution opportunity, when they trigger Blueprint generation, then all required sections (FR-7.1) are populated before the Blueprint is presented as "ready."
-- Given the Blueprint is generated, then a "Send to Google Jules" / "Continue to Jules" action is available and uses the generated prompt (see §6.8).
+- Given the Blueprint is generated, then a "Continue to Google Jules" action is available that triggers an API-driven Jules Session creation and redirects the user to `jules.google.com` with all context pre-loaded (see §6.8).
 - Given generation is in progress, the user sees a clear, premium-feeling loading state (this is a key demo moment) rather than a generic spinner.
 - Given the AI cannot generate a section with high confidence, that section is shown with a visible lower-confidence indicator rather than omitted silently or filled with generic filler text.
 
@@ -580,51 +580,75 @@ Each feature below includes functional requirements, user stories, acceptance cr
 
 ---
 
-### 6.8 Feature: Google Jules Handoff
+### 6.8 Feature: Google Jules Handoff (API-Driven)
 
-**Purpose:** Seamlessly transition the developer from planning (OpenScout.ai) to implementation (Google Jules), preserving all context generated in the Blueprint.
+**Purpose:** Seamlessly transition the developer from planning (OpenScout.ai) to implementation (Google Jules), preserving all context generated in the Blueprint. The integration uses the **Jules REST API** to programmatically create Jules Sessions with the Blueprint's context pre-loaded.
 
 **User Story**
 > As a developer, I want to move into Google Jules with all my context already loaded, so I don't have to re-explain what I'm doing.
 
+**Integration Architecture**
+
+The Jules REST API is built around three core concepts:
+- **Source:** A connected GitHub repository (requires the Jules GitHub App installed on the repo).
+- **Session:** A unit of work where Jules executes a task — created programmatically by the OpenScout.ai backend with the Blueprint's `final_jules_prompt`.
+- **Activity:** Individual events within a session (plan generation, message exchanges, code changes).
+
+Authentication uses a per-user Jules API key passed via the `X-Goog-Api-Key` header. Users generate this key from their Jules settings page at `jules.google.com`.
+
 **Functional Requirements**
-- FR-8.1: **Preferred implementation:** Google Jules embedded directly within the OpenScout.ai experience, pre-loaded with the Blueprint's final prompt.
-- FR-8.2: **Fallback implementation (hackathon-realistic default):** A smooth handoff flow — e.g., a "Continue to Google Jules" action that opens/deep-links to Jules with the generated prompt pre-filled or easily copyable, plus the full Blueprint remaining accessible for reference.
+- FR-8.1: **Primary implementation (API-driven):** When the user clicks "Continue to Google Jules," the OpenScout.ai backend calls the Jules REST API to create a new Session, passing the Blueprint's `final_jules_prompt` as the session prompt and the target repository as the Source. The backend receives a session URL and redirects the user to `jules.google.com` where all context is already loaded.
+- FR-8.2: **Graceful degradation:** If the Jules API is unreachable, the user hasn't configured their Jules API key, or the Jules GitHub App is not installed on the target repository, the prompt is displayed in a polished, copy-to-clipboard block. This must be designed as a deliberate, finished experience — not a broken state.
 - FR-8.3: Regardless of implementation path, OpenScout.ai's responsibility ends at handing off complete, well-structured context. It must **never** attempt to write code, create commits, open PRs, or perform any implementation action itself (hard boundary, MRD §22).
 - FR-8.4: After handoff, the Blueprint remains saved and accessible (developer may return to reference it mid-implementation).
+- FR-8.5: The user's Jules API key is stored securely in their profile (via Clerk user metadata or an encrypted field in the `users` collection). OpenScout.ai provides a settings screen for users to add/update/remove their Jules API key.
 
 **Acceptance Criteria**
-- Given a completed Blueprint, when the user selects "Continue to Google Jules," then the final prompt is transferred (embedded session or copy/deep-link) without requiring the user to manually re-type or reconstruct context.
-- Given the embedded path is not feasible, then the fallback clearly and smoothly presents the prompt for manual handoff — this must not feel like a broken or half-finished feature; it should be designed as a deliberate, polished handoff screen.
+- Given a completed Blueprint and a configured Jules API key, when the user selects "Continue to Google Jules," then the backend creates a Jules Session via the API and the user is redirected to `jules.google.com` with all context pre-loaded — zero manual re-entry required.
+- Given the Jules API is unreachable or the user has no API key configured, then the fallback copy-to-clipboard screen is presented as a polished, intentional experience with clear instructions.
+- Given the Jules GitHub App is not installed on the target repository, then the user is shown a clear message explaining the requirement with a link to install the Jules GitHub App, plus the copy-paste fallback.
 
 **Edge Cases**
-- Google Jules is unavailable/unreachable (embedded path): fall back gracefully to the copy/deep-link path rather than erroring out.
+- Jules API is unavailable or returns an error: fall back gracefully to the copy-to-clipboard path. Log the failure for analytics (`jules_handoff_failed`).
 - User has multiple Blueprints open across sessions: each handoff must carry the correct, corresponding prompt — no cross-contamination between Blueprints.
+- User's Jules API key is invalid or expired: show a clear error message with a link to regenerate their key at `jules.google.com`, plus the copy-paste fallback.
+- Jules GitHub App not installed on target repo: show an actionable message guiding the user to install it, plus the copy-paste fallback.
 
 **API Expectations**
-- TBD — dependent on actual Google Jules integration surface (embed SDK vs. URL scheme vs. none available for hackathon). Engineering should confirm what integration points Jules actually exposes before committing to the embedded path; the PRD intentionally does not assume specifics here since the MRD does not detail Jules' API.
-- Minimum viable: `GET /api/blueprints/:id/jules-handoff` — returns the formatted final prompt payload ready for whichever handoff mechanism is used.
+- `POST /api/blueprints/:id/jules-handoff` — The backend:
+  1. Retrieves the Blueprint's `final_jules_prompt` and target repository info.
+  2. Retrieves the user's stored Jules API key.
+  3. Calls the Jules REST API to list Sources (verify the target repo is connected).
+  4. Creates a new Jules Session with the `final_jules_prompt` as the session prompt.
+  5. Returns `{ session_url, session_id, method: "api" }` on success.
+  6. On failure, returns `{ prompt: final_jules_prompt, method: "copy", error_reason }` so the frontend can display the copy-paste fallback.
 
 **Database Requirements**
-- No new tables required; reuses `blueprints.final_jules_prompt`. Optionally log handoff events: `handoff_events` table (`blueprint_id`, `method` [embedded|link|copy], `initiated_at`).
+- No new tables required for the core flow; reuses `blueprints.final_jules_prompt`.
+- `users` collection: add `jules_api_key` field (encrypted string, nullable) — stores the user's Jules API key.
+- `handoff_events` table: `blueprint_id`, `method` [`api`|`copy`], `jules_session_id` (nullable), `jules_session_url` (nullable), `error_reason` (nullable), `initiated_at`.
 
 **Screens**
-- **Handoff screen/modal:** Blueprint summary recap (compact) + prominent "Continue to Google Jules" action + the prompt itself visible/copyable as a fallback safety net regardless of primary method.
+- **Handoff screen/modal:** Blueprint summary recap (compact) + prominent "Continue to Google Jules" button. When clicked, a loading state is shown while the backend calls the Jules API. On success, the user is redirected. The prompt itself remains visible/copyable as a safety net regardless of the API outcome.
+- **Jules API key settings:** A section in the user's profile/settings page where they can add, update, or remove their Jules API key. Includes a link to `jules.google.com` settings to generate a key.
 
 **Loading States**
-- If embedding Jules, show a load state while the embedded session initializes.
+- Show a loading state with messaging (e.g., "Creating your Jules session…") while the backend calls the Jules API to create the session. This typically takes 1–3 seconds.
 
 **Error Handling**
-- If handoff mechanism fails, always leave the user with a manual copy-paste fallback — this path must never be a dead end.
+- If the Jules API call fails, display the copy-paste fallback immediately with a non-alarming message (e.g., "We couldn't connect to Jules automatically. You can copy the prompt below and paste it into Jules directly."). This path must never be a dead end.
+- If the user has no Jules API key configured, show a setup prompt linking to their OpenScout.ai settings page and `jules.google.com`.
 
 **Analytics Events**
-- `jules_handoff_initiated` (method), `jules_handoff_succeeded`, `jules_handoff_failed`, `jules_prompt_copied` (fallback path usage).
+- `jules_handoff_initiated` (method: `api`|`copy`), `jules_handoff_succeeded` (includes `jules_session_id`), `jules_handoff_failed` (includes `error_reason`), `jules_prompt_copied` (tracks fallback path usage).
 
 **Security Considerations**
-- If embedding a third-party tool, ensure no OpenScout.ai session credentials or GitHub tokens are exposed to the embedded context beyond what's explicitly needed.
+- The user's Jules API key must be stored encrypted at rest and never exposed to the frontend. All Jules API calls are made server-side from the Python backend.
+- No OpenScout.ai session credentials or GitHub tokens are sent to the Jules API — only the user's own Jules API key and the prompt content.
 
 **Implementation Notes**
-- Given hackathon time constraints and the MRD's own framing ("hackathon fallback: smooth handoff"), engineering should default to designing and building the fallback path as the primary target, and treat embedding as a stretch goal if time permits — this matches the MRD's own risk framing.
+- The Jules REST API integration is straightforward: the backend makes two API calls (list Sources to verify the repo, then create Session). This should be implemented as a dedicated `jules_handoff_service` in the backend service layer.
+- The API-driven path is the primary target. The copy-paste fallback requires minimal additional work since the prompt is already generated — it just needs a polished UI treatment.
 
 ---
 
@@ -864,12 +888,12 @@ Exact schema types, indexes, and migrations are left to engineering; the above d
 | `repository_opened`, `repository_analysis_triggered/completed/failed/served_from_cache` | Repo detail engagement |
 | `opportunities_viewed`, `opportunity_selected`, `ai_generated_opportunity_shown` | Opportunity engagement |
 | `blueprint_generation_started/completed/failed`, `blueprint_viewed`, `blueprint_reopened_from_history` | Blueprint lifecycle — **primary KPI funnel** |
-| `jules_handoff_initiated/succeeded/failed`, `jules_prompt_copied` | Handoff — **primary KPI completion event** |
+| `jules_handoff_initiated` (method: `api`\|`copy`), `jules_handoff_succeeded` (includes `jules_session_id`), `jules_handoff_failed` (includes `error_reason`), `jules_prompt_copied` | Handoff via Jules REST API — **primary KPI completion event** |
 | `dashboard_viewed`, `dashboard_load_time` | Dashboard engagement |
 | `search_performed`, `search_result_clicked` | Manual search |
 | `history_viewed`, `repository_saved/unsaved`, `blueprint_reopened` | Saved history |
 
-The **primary KPI** (user reaches Google Jules with a completed Blueprint) is measurable as the funnel: `dashboard_viewed → recommendation_card_clicked → repository_analysis_completed → opportunity_selected → blueprint_generation_completed → jules_handoff_succeeded`.
+The **primary KPI** (user reaches Google Jules with a completed Blueprint via API-driven session creation) is measurable as the funnel: `dashboard_viewed → recommendation_card_clicked → repository_analysis_completed → opportunity_selected → blueprint_generation_completed → jules_handoff_succeeded`. The `jules_handoff_succeeded` event confirms that a Jules Session was created via the REST API and the user was redirected. `jules_prompt_copied` tracks fallback usage when the API path is unavailable.
 
 ---
 
