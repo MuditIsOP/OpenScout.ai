@@ -95,35 +95,35 @@ The recommendation engine, Blueprint tone, and UI copy must **optimize primarily
 
 ---
 
-## 4. Scope
+## 4. Scope & Phase Boundaries
 
-### 4.1 In Scope (MVP)
-1. GitHub OAuth login (using Clerk)
-2. Developer profile analysis (skill/competency inference)
-3. Personalized repository recommendations with explanations
-4. Repository eligibility filtering (quality gate)
-5. Repository detail page with AI-generated summary and confidence score
-6. On-open repository analysis (cached, lazy-triggered)
-7. Contribution opportunity discovery, prioritized per the MRD's 8-tier strategy
-8. Contribution Blueprint generation
-9. Handoff to Google Jules (API-driven session creation via the Jules REST API)
-10. Personalization-forward dashboard/homepage
-11. Manual search (secondary to recommendations)
-12. Saved history (recent repos, reopenable Blueprints, saved-for-later repos)
-13. Cross-cutting AI transparency layer (confidence scores, explanations, uncertainty messaging) applied throughout
+### 4.1 In Scope (Phase 1 MVP)
+The scope of Phase 1 is strictly focused on **Developer Profile Analysis and Personalized Repository Recommendations**.
+1. **Authentication:** Clerk GitHub OAuth login, with user account sync using Clerk webhooks to the backend database.
+2. **Profile Analysis:** Dynamic analysis of public GitHub activity to estimate languages, frameworks, topics, and competency level (asynchronously tracked).
+3. **Fallback preferences:** Prompting and persisting manual preferences if a user has an empty or near-empty GitHub profile, integrating these with any sparse GitHub signal to form the profile.
+4. **Candidate repository pool ingestion:** Querying the GitHub Search API dynamically using user profile terms and caching candidates in the local repository cache.
+5. **Deterministic eligibility filtering:** A quality gate filter running on candidate repositories to discard forks, inactive repositories, or those lacking licenses/READMEs.
+6. **Heuristic recommendation engine:** A weighted heuristic matching engine that scores eligible repositories against the developer's profile.
+7. **Explainable AI recommendations:** Gemini-generated explanation strings justifying the recommendations based on the heuristic scores.
+8. **Durable background jobs:** Storing job statuses (queued, running, completed, failed) in a MongoDB collection so FastAPI background tasks can be polled and survive restarts.
+9. **Personalized dashboard:** Card-based list displaying user profiles and recommended repositories, with loading and empty states.
+10. **Minimal AI observability:** Logging LLM token usage and latency in MongoDB.
 
-### 4.2 Out of Scope (MVP)
-Explicitly excluded, per MRD §22 and planning context:
-- AI writing production code
-- Automatic pull request creation
-- Automatic commits
-- Automatic merges
-- AI replacing Google Jules
-- Any guarantee that AI-generated suggestions are correct — developers remain responsible for review, testing, and submission
+### 4.2 Out of Scope (Phase 1 MVP - Deferred to Phase 2 & 3)
+The following features are explicitly out of scope for the Phase 1 build and are deferred to later phases:
+- **Repository codebase analysis & summaries** (§6.5) -> *Deferred to Phase 2*
+- **Manual repository search** (§6.10) -> *Deferred to Phase 2*
+- **Saved repository history** (§6.11) -> *Deferred to Phase 2*
+- **Contribution opportunity discovery** (finding open issues, prioritizing into Tiers 1-8) (§6.6) -> *Deferred to Phase 2*
+- **Contribution Blueprint generation** (§6.7) -> *Deferred to Phase 3*
+- **Google Jules API Integration & Handoff** (§6.8) -> *Deferred to Phase 3*
+- **Storj integration** (S3-like object storage for Blueprint artifacts) -> *Deferred to Phase 3*
+- **AI writing production code, automatic commit/PR creation** -> *Deferred/Never*
 
-### 4.3 Integration Strategy — Jules Handoff
-- **Primary path (API-driven):** The OpenScout.ai backend creates a Jules Session via the Jules REST API, pre-loading the Blueprint's `final_jules_prompt` as context. The user is then redirected to the session on `jules.google.com` where all context is already loaded — zero manual re-entry required.
-- **Graceful degradation:** If the Jules API is unreachable or the user hasn't configured their Jules API key, the prompt is displayed in a polished, copy-to-clipboard block so the user can manually paste it into Jules. This is designed as a deliberate, finished experience — not a broken fallback. See §6.8 for full details.
+### 4.3 Integration Strategy (Phase 3 Forward)
+- **Primary path (API-driven):** During Phase 3, the OpenScout.ai backend will create a Jules Session via the Jules REST API, pre-loading the Blueprint's `final_jules_prompt` as context. The user is then redirected to the session on `jules.google.com` where all context is already loaded.
+- **Graceful degradation:** If the Jules API is unreachable, the prompt will display in a copy-to-clipboard block. This remains a Phase 3 task.
 
 ---
 
@@ -182,14 +182,13 @@ Each feature below includes functional requirements, user stories, acceptance cr
 - Rate limit hit during token exchange → queue/retry with backoff; inform user if delay exceeds a few seconds.
 
 **API Expectations**
-- `POST /api/auth/github/callback` — exchanges OAuth code for access token, syncs user, updates connections, returns session token.
-- `POST /api/auth/logout` — invalidates session.
-- `GET /api/auth/me` — returns current authenticated user summary.
+- `POST /api/auth/webhook/clerk` — webhook receiver for Clerk events (user.created, user.updated, user.deleted) to sync user profiles in MongoDB.
+- `GET /api/auth/me` — returns the active user's details decoded from Clerk's session token.
 
 **Database Requirements**
-- `users` table: `id`, `clerk_id`, `github_id`, `github_username`, `avatar_url`, `created_at`, `last_login_at`, `profile_analysis_status`.
-- `oauth_connections` table: `id`, `user_id` (FK), `provider`, `access_token` (encrypted), `refresh_token` (encrypted), `scopes` (array), `token_status`, `key_rotation_metadata` (JSON), `created_at`, `updated_at`.
-- `user_preferences` table: `id`, `user_id` (FK), `skills` (array), `languages` (array), `frameworks` (array), `interests` (array), `contribution_preferences` (array), `difficulty_preference`, `jules_api_key` (encrypted), `created_at`, `updated_at`.
+- `users` collection: `_id` (ObjectId), `clerk_id` (string), `github_id` (string), `github_username` (string), `avatar_url` (string), `created_at` (datetime), `last_login_at` (datetime), `current_profile_job_id` (string), `profile_analysis_status` (string).
+- `oauth_connections` collection: `_id` (ObjectId), `user_id` (ObjectId), `provider` (string), `access_token` (encrypted string), `refresh_token` (encrypted string), `scopes` (array of strings), `token_status` (string), `key_rotation_metadata` (document), `created_at` (datetime), `updated_at` (datetime).
+- `user_preferences` collection: `_id` (ObjectId), `user_id` (ObjectId), `skills` (array), `languages` (array), `frameworks` (array), `interests` (array), `contribution_preferences` (array), `difficulty_preference` (string), `jules_api_key` (encrypted string), `created_at` (datetime), `updated_at` (datetime).
 
 **Screens**
 - **Login screen:** Product value prop (one-liner + tagline), single "Continue with GitHub" CTA. No secondary auth options for MVP.
@@ -202,14 +201,14 @@ Each feature below includes functional requirements, user stories, acceptance cr
 - `auth_login_started`, `auth_login_succeeded`, `auth_login_failed` (with reason category), `auth_logout`.
 
 **Security Considerations**
-- Store GitHub access tokens and refresh tokens in `oauth_connections`, encrypted at rest using AES-GCM (256-bit).
+- Store GitHub access tokens and refresh tokens in `oauth_connections` collection, encrypted at rest using AES-GCM (256-bit).
 - Never expose the `oauth_connections` record or access tokens to the client via normal user endpoints.
 - Establish credentials isolation: a compromise of user profile data does not expose OAuth tokens.
-- Use state parameter / PKCE to prevent CSRF on OAuth flow.
+- Clerk handles OAuth callback state security.
 - Scope requests to the minimum required (principle of least privilege) — re-affirms FR-1.2.
 
 **Implementation Notes**
-- **Authentication Provider:** Clerk is the designated authentication provider. GitHub OAuth credentials and session tokens will be managed through Clerk, and sync'd to the backend database's `oauth_connections` on login/refresh.
+- **Authentication Provider:** Clerk is the designated authentication provider. Clerk handles session tokens, logout, and token refresh. The backend handles synchronization via a verified Clerk webhook endpoint (`/api/auth/webhook/clerk`).
 
 ---
 
@@ -244,18 +243,19 @@ Each feature below includes functional requirements, user stories, acceptance cr
 - Given analysis is still in progress, the dashboard shows a clear loading/skeleton state, not an empty or broken one.
 
 **Edge Cases**
-- **Empty GitHub profile** (explicit MRD edge case, §21): show a friendly empty state explaining that recommendations will be general until more signal is available, and offer manual search as an immediate alternative.
+- **Empty GitHub profile / Sparse Evidence (Onboarding Fallback):** If public GitHub signals are below threshold (e.g. no repositories, zero commits, or private-only), redirect the user to a manual onboarding form to self-select skills, languages, frameworks, interests, and difficulty preferences. These are stored in `user_preferences`. The system combines these manual preferences with any sparse GitHub signals to build the `developer_profiles` document and snapshot, enabling personalized recommendations.
 - Private-only repositories (no public data): treat similarly to empty profile.
-- Extremely large number of repos: cap analysis to a representative sample (TBD: exact sampling strategy — e.g., most recently active N repos) to control cost/latency.
+- Extremely large number of repos: cap analysis to a representative sample (e.g., most recently active 20 repos) to control cost and latency.
 - GitHub API rate limiting during analysis: queue and retry; communicate delay to user if analysis is taking unusually long.
 
 **API Expectations**
-- `POST /api/profile/analyze` — triggers (re)analysis for the current user (internal/system-triggered post-login; not necessarily user-facing).
-- `GET /api/profile/me` — returns current profile analysis, including per-attribute confidence scores and `analysis_status` (`pending` | `in_progress` | `complete` | `failed`).
+- `POST /api/profile/analyze` — triggers background profile analysis. Returns a background job record (`job_id`, status `queued`).
+- `GET /api/profile/me` — returns current profile analysis, including primary languages, frameworks, skills, interests, confidence, and `profile_analysis_status`.
+- `PUT /api/profile/preferences` — saves manually configured skills and preferences.
 
 **Database Requirements**
-- `developer_profiles` table: `id`, `user_id` (FK), `experience_level`, `experience_confidence`, `contribution_history_summary`, `project_domains` (JSON), `last_analyzed_at`, `analysis_version`.
-- `profile_snapshots` table: `id`, `user_id` (FK), `developer_profile_id` (FK), `inferred_skills` (JSON), `source_evidence` (JSON), `scoring_rationale`, `created_at`.
+- `developer_profiles` collection: `_id` (ObjectId), `user_id` (ObjectId), `experience_level` (string), `experience_confidence` (double), `primary_languages` (array of strings), `frameworks` (array of strings), `skills` (array of strings), `interests` (array of strings), `contribution_history_summary` (document), `project_domains` (array of strings), `last_analyzed_at` (datetime), `analysis_version` (string).
+- `profile_snapshots` collection: `_id` (ObjectId), `user_id` (ObjectId), `developer_profile_id` (ObjectId), `inferred_skills` (document), `source_evidence` (document), `scoring_rationale` (string), `created_at` (datetime).
 
 
 **Screens**
@@ -319,13 +319,15 @@ Each feature below includes functional requirements, user stories, acceptance cr
 - Ties in match score: TBD — defer to secondary sort (e.g., repo health or recency); exact tie-break order left to engineering.
 
 **API Expectations**
-- `GET /api/recommendations` — returns ranked list for current user: repo metadata, match %, confidence, top reasons.
-- `POST /api/recommendations/feedback` — (TBD scope) records dismiss/save/not-interested signal.
+- `POST /api/recommendations/generate` — triggers asynchronous recommendations generation. Returns a background job record (`job_id`, status `queued`).
+- `GET /api/recommendations` — returns the latest successfully completed recommendation run's recommendations list.
+- `GET /api/recommendations/runs/:run_id` — returns the list of recommended repositories for a specific recommendation run.
+- `POST /api/recommendations/feedback` — records dismiss/save/not-interested signal.
 
 **Database Requirements**
-- `recommendation_runs` table: `id`, `user_id` (FK), `profile_snapshot_id` (FK), `scoring_algorithm_version`, `filters_applied` (JSON), `candidates_evaluated_count`, `idempotency_key`, `created_at`.
-- `recommendations` table: `id`, `recommendation_run_id` (FK), `user_id` (FK), `repository_id` (FK), `match_score`, `confidence_score`, `reasons` (JSON array), `created_at`.
-- `repositories` table (shared with §6.4/6.5): `id`, `github_repo_id`, `full_name`, `description`, `primary_language`, `topics` (JSON), `stars`, `forks`, `open_issues_count`, `last_commit_at`, `license`, `is_fork`, `is_archived`, `health_score`, `beginner_friendly_score`, `doc_quality_score`, `size_kb`, `eligibility_status`, `eligibility_reasons` (JSON), `cached_at`.
+- `recommendation_runs` collection: `_id` (ObjectId), `user_id` (ObjectId), `profile_snapshot_id` (ObjectId), `scoring_algorithm_version` (string), `filters_applied` (document), `candidates_evaluated_count` (int), `idempotency_key` (string), `created_at` (datetime).
+- `recommendations` collection: `_id` (ObjectId), `recommendation_run_id` (ObjectId), `user_id` (ObjectId), `repository_id` (ObjectId), `match_score` (double), `confidence_score` (double), `reasons` (array of strings), `created_at` (datetime).
+- `repositories` collection (shared with §6.4/6.5): `_id` (ObjectId), `github_repo_id` (long), `full_name` (string), `description` (string), `primary_language` (string), `topics` (array of strings), `stars` (int), `forks` (int), `open_issues_count` (int), `last_commit_at` (datetime), `license` (string), `is_fork` (boolean), `is_archived` (boolean), `health_score` (double), `beginner_friendly_score` (double), `doc_quality_score` (double), `size_kb` (int), `eligibility_status` (string), `eligibility_reasons` (array of strings), `cached_at` (datetime).
 
 
 **Screens**
@@ -384,7 +386,7 @@ Each feature below includes functional requirements, user stories, acceptance cr
 - Eligibility filtering is implemented as a pipeline stage, not necessarily a standalone public endpoint. Internal function: `isRepositoryEligible(repo) → { eligible: boolean, reasons: string[] }`.
 
 **Database Requirements**
-- Extends `repositories` table (§6.3) with `eligibility_status` (enum) and `eligibility_reasons` (JSON) for transparency/debugging.
+- Extends `repositories` collection (§6.3) with `eligibility_status` (string) and `eligibility_reasons` (array of strings) for transparency/debugging.
 
 **Screens**
 - No standalone screen; enforced upstream of Recommendations (§6.3) and reflected as a flag in manual Search results (§6.10) if a searched repo is ineligible.
@@ -403,9 +405,9 @@ Each feature below includes functional requirements, user stories, acceptance cr
 
 ---
 
-### 6.5 Feature: Repository Overview / Detail Page & On-Open Analysis
+### 6.5 Feature: Repository Overview / Detail Page & On-Open Analysis [DEFERRED TO PHASE 2]
 
-**Purpose:** Help the developer understand an unfamiliar repository quickly, without reading full documentation, once they've opened it from recommendations or search.
+**Purpose (Phase 2):** Help the developer understand an unfamiliar repository quickly, without reading full documentation, once they've opened it from recommendations or search.
 
 **User Story**
 > As a developer, I want an AI-generated summary of a repository's purpose, structure, and health so that I can decide if I want to contribute without spending an hour reading docs.
@@ -447,7 +449,7 @@ Each feature below includes functional requirements, user stories, acceptance cr
 - `GET /api/repositories/:id/analysis-status` — for polling during analysis (or use websocket/SSE — implementation detail, TBD).
 
 **Database Requirements**
-- `repository_analyses` table: `id`, `repository_id` (FK), `default_branch`, `commit_sha`, `analysis_version`, `summary_text`, `tech_stack` (JSON), `activity_summary`, `community_summary`, `contribution_friendliness_score`, `onboarding_difficulty` (enum), `confidence_score`, `analyzed_at`, `cache_invalidated_at` (nullable).
+- `repository_analyses` collection: `_id` (ObjectId), `repository_id` (ObjectId), `default_branch` (string), `commit_sha` (string), `analysis_version` (string), `summary_text` (string), `tech_stack` (array of strings), `activity_summary` (string), `community_summary` (string), `contribution_friendliness_score` (double), `onboarding_difficulty` (string), `confidence_score` (double), `analyzed_at` (datetime), `cache_invalidated_at` (datetime, nullable).
 
 
 **Screens**
@@ -470,9 +472,9 @@ Each feature below includes functional requirements, user stories, acceptance cr
 
 ---
 
-### 6.6 Feature: Contribution Opportunity Discovery & Prioritization
+### 6.6 Feature: Contribution Opportunity Discovery & Prioritization [DEFERRED TO PHASE 2]
 
-**Purpose:** Surface real, actionable contribution opportunities within a repository, prioritized to prefer existing legitimate issues over invented ones.
+**Purpose (Phase 2):** Surface real, actionable contribution opportunities within a repository, prioritized to prefer existing legitimate issues over invented ones.
 
 **User Story**
 > As a developer, I want to know what I could actually work on in this repository, starting with real issues rather than made-up busywork.
@@ -506,7 +508,7 @@ Each feature below includes functional requirements, user stories, acceptance cr
 - `GET /api/repositories/:id/opportunities` — returns tiered list of opportunities with tier label, source (GitHub issue link vs. AI-generated), and confidence (for tier 8 only).
 
 **Database Requirements**
-- `contribution_opportunities` table: `id`, `repository_id` (FK), `repository_commit_sha`, `tier` (1–8), `source_type` (github_issue | ai_generated), `github_issue_number` (nullable), `github_issue_url` (nullable), `current_issue_state` (nullable), `assignees` (array), `linked_pull_requests` (array), `title`, `description`, `confidence_score` (nullable, required if tier=8), `estimated_difficulty`, `last_issue_activity` (nullable), `last_verification_time`, `expiration_time` (nullable), `relevant_verified_file_paths` (array), `is_possibly_claimed`, `created_at`.
+- `contribution_opportunities` collection: `_id` (ObjectId), `repository_id` (ObjectId), `repository_commit_sha` (string), `tier` (int: 1–8), `source_type` (string: github_issue | ai_generated), `github_issue_number` (int, nullable), `github_issue_url` (string, nullable), `current_issue_state` (string, nullable), `assignees` (array of strings), `linked_pull_requests` (array of strings), `title` (string), `description` (string), `confidence_score` (double, nullable, required if tier=8), `estimated_difficulty` (string), `last_issue_activity` (datetime, nullable), `last_verification_time` (datetime), `expiration_time` (datetime, nullable), `relevant_verified_file_paths` (array of strings), `is_possibly_claimed` (boolean), `created_at` (datetime).
 
 
 **Screens**
@@ -529,9 +531,9 @@ Each feature below includes functional requirements, user stories, acceptance cr
 
 ---
 
-### 6.7 Feature: Contribution Blueprint Generation
+### 6.7 Feature: Contribution Blueprint Generation [DEFERRED TO PHASE 3]
 
-**Purpose:** The product's signature feature — a structured onboarding document that fully prepares the developer before they touch code, and produces the final handoff artifact for Google Jules.
+**Purpose (Phase 3):** The product's signature feature — a structured onboarding document that fully prepares the developer before they touch code, and produces the final handoff artifact for Google Jules.
 
 **User Story**
 > As a developer, I want a single, structured plan that explains what I'm building, why, and how — plus a ready-to-use prompt for Google Jules — so I can move from "I found a repo" to "I'm implementing" with confidence.
@@ -574,7 +576,7 @@ Each feature below includes functional requirements, user stories, acceptance cr
 - `PATCH /api/blueprints/:id` — regenerate/update (e.g., swap opportunity).
 
 **Database Requirements**
-- `blueprints` table: `id`, `blueprint_group_id`, `version`, `supersedes_blueprint_id` (FK, nullable), `user_id` (FK), `repository_id` (FK), `repository_commit_sha`, `opportunity_id` (FK), `prompt_version`, `output_schema_version`, `repository_understanding`, `match_explanation`, `confidence_level`, `estimated_difficulty`, `estimated_effort`, `learning_objectives` (JSON array), `constraints` (JSON array), `suggested_reading_order` (JSON array), `implementation_strategy`, `final_jules_prompt`, `idempotency_key`, `status` (generating | complete | failed), `created_at`.
+- `blueprints` collection: `_id` (ObjectId), `blueprint_group_id` (ObjectId), `version` (int), `supersedes_blueprint_id` (ObjectId, nullable), `user_id` (ObjectId), `repository_id` (ObjectId), `repository_commit_sha` (string), `opportunity_id` (ObjectId), `prompt_version` (string), `output_schema_version` (string), `repository_understanding` (string), `match_explanation` (string), `confidence_level` (double), `estimated_difficulty` (string), `estimated_effort` (string), `learning_objectives` (array of strings), `constraints` (array of strings), `suggested_reading_order` (array of documents), `implementation_strategy` (string), `final_jules_prompt` (string), `idempotency_key` (string), `status` (string: generating | complete | failed), `created_at` (datetime).
 
 
 **Screens**
@@ -598,9 +600,9 @@ Each feature below includes functional requirements, user stories, acceptance cr
 
 ---
 
-### 6.8 Feature: Google Jules Handoff (API-Driven)
+### 6.8 Feature: Google Jules Handoff (API-Driven) [DEFERRED TO PHASE 3]
 
-**Purpose:** Seamlessly transition the developer from planning (OpenScout.ai) to implementation (Google Jules), preserving all context generated in the Blueprint. The integration uses the **Jules REST API** to programmatically create Jules Sessions with the Blueprint's context pre-loaded.
+**Purpose (Phase 3):** Seamlessly transition the developer from planning (OpenScout.ai) to implementation (Google Jules), preserving all context generated in the Blueprint. The integration uses the **Jules REST API** to programmatically create Jules Sessions with the Blueprint's context pre-loaded.
 
 **User Story**
 > As a developer, I want to move into Google Jules with all my context already loaded, so I don't have to re-explain what I'm doing.
@@ -643,9 +645,7 @@ Authentication uses a per-user Jules API key passed via the `X-Goog-Api-Key` hea
   5. Returns `{ session_url, session_id, method: "api" }` on success.
   6. On failure, returns `{ prompt: final_jules_prompt, method: "copy", error_reason }` so the frontend can display the copy-paste fallback.
 
-**Database Requirements**
-- `user_preferences` collection: contains encrypted `jules_api_key` (nullable).
-- `handoff_events` table: `id`, `blueprint_id` (FK), `method` (`api` | `copy`), `jules_session_id` (nullable), `jules_session_url` (nullable), `error_reason` (nullable), `idempotency_key`, `initiated_at`.
+- `handoff_events` collection: `_id` (ObjectId), `blueprint_id` (ObjectId), `method` (string: api | copy), `jules_session_id` (string, nullable), `jules_session_url` (string, nullable), `error_reason` (string, nullable), `idempotency_key` (string), `initiated_at` (datetime).
 
 
 **Screens**
@@ -700,7 +700,7 @@ Authentication uses a per-user Jules API key passed via the `X-Goog-Api-Key` hea
 - `GET /api/dashboard` — aggregate endpoint returning profile summary + top recommendations + saved-history preview in one call (reduces round trips for a fast-feeling load, consistent with UX Philosophy "fast").
 
 **Database Requirements**
-- No new tables; aggregates `developer_profiles`, `recommendations`, and `blueprints`/saved history.
+- No new collections; aggregates `developer_profiles`, `recommendations`, and `blueprints`/saved history.
 
 **Screens**
 - **Dashboard:** "Your Profile" summary module (top) → "Recommended for You" feed (primary content) → secondary access to Search and Saved History (nav-level, not competing for primary visual space).
@@ -722,9 +722,9 @@ Authentication uses a per-user Jules API key passed via the `X-Goog-Api-Key` hea
 
 ---
 
-### 6.10 Feature: Manual Search
+### 6.10 Feature: Manual Search [DEFERRED TO PHASE 2]
 
-**Purpose:** Secondary discovery path for users who want to look up a specific repository rather than rely on recommendations.
+**Purpose (Phase 2):** Secondary discovery path for users who want to look up a specific repository rather than rely on recommendations.
 
 **User Story**
 > As a developer, I want to search for a specific repository directly, in case I already have one in mind.
@@ -746,7 +746,7 @@ Authentication uses a per-user Jules API key passed via the `X-Goog-Api-Key` hea
 - `GET /api/search?q=...` — proxies/wraps GitHub repository search, annotated with eligibility flags.
 
 **Database Requirements**
-- No dedicated table; search results reuse the `repositories` cache/eligibility logic (§6.3/§6.4) where already-analyzed, and hit GitHub live otherwise.
+- No dedicated collection; search results reuse the `repositories` cache/eligibility logic (§6.3/§6.4) where already-analyzed, and hit GitHub live otherwise.
 
 **Screens**
 - **Search bar** (persistent but secondary in visual hierarchy, e.g., top nav rather than homepage hero) → **Search results list** (same card pattern as recommendations, minus the personalized match %/reasoning, since these aren't AI-recommended).
@@ -768,9 +768,9 @@ Authentication uses a per-user Jules API key passed via the `X-Goog-Api-Key` hea
 
 ---
 
-### 6.11 Feature: Saved History
+### 6.11 Feature: Saved History [DEFERRED TO PHASE 2]
 
-**Purpose:** Let users revisit previous work — critical for a tool meant to be used across multiple sessions, not just once.
+**Purpose (Phase 2):** Let users revisit previous work — critical for a tool meant to be used across multiple sessions, not just once.
 
 **User Story**
 > As a developer, I want to come back later and see the repositories I explored and the Blueprints I generated, so I don't lose my progress.
@@ -796,8 +796,8 @@ Authentication uses a per-user Jules API key passed via the `X-Goog-Api-Key` hea
 - `POST /api/repositories/:id/save` / `DELETE /api/repositories/:id/save` — save/unsave for later.
 
 **Database Requirements**
-- `user_repository_states` table: `id`, `user_id` (FK), `repository_id` (FK), `is_saved`, `saved_at` (nullable), `is_viewed`, `last_viewed_at` (nullable), `recommendation_state` (active/dismissed/completed), `created_at`, `updated_at`.
-- Blueprints already persisted per §6.7 (`blueprints` table), queried by `user_id`.
+- `user_repository_states` collection: `_id` (ObjectId), `user_id` (ObjectId), `repository_id` (ObjectId), `is_saved` (boolean), `saved_at` (datetime, nullable), `is_viewed` (boolean), `last_viewed_at` (datetime, nullable), `recommendation_state` (string: active/dismissed/completed), `created_at` (datetime), `updated_at` (datetime).
+- Blueprints already persisted per §6.7 (`blueprints` collection), queried by `user_id`.
 
 
 **Screens**
@@ -832,7 +832,7 @@ Authentication uses a per-user Jules API key passed via the `X-Goog-Api-Key` hea
 - FR-12.5: All jobs require an `idempotency_key` to guarantee duplicate request retries from the client do not spin up duplicate jobs.
 
 **Database Requirements:**
-- `background_jobs` table: `id`, `job_type`, `status` (queued/running/completed/failed/dead_letter), `retries`, `attempt_count`, `idempotency_key`, `worker_lease`, `timeout`, `dead_letter_state` (JSON), `payload` (JSON), `created_at`, `updated_at`.
+- `background_jobs` collection: `_id` (ObjectId), `job_type` (string), `status` (string: queued/running/completed/failed/dead_letter), `retries` (int), `attempt_count` (int), `idempotency_key` (string), `worker_lease` (string), `timeout` (int), `dead_letter_state` (document), `payload` (document), `created_at` (datetime), `updated_at` (datetime).
 
 ---
 
@@ -846,7 +846,7 @@ Authentication uses a per-user Jules API key passed via the `X-Goog-Api-Key` hea
 - FR-13.3: Estimates of cost must be calculated programmatically based on token counts and model pricing matrices.
 
 **Database Requirements:**
-- `ai_runs` table: `id`, `provider`, `model`, `prompt_version`, `output_schema_version`, `token_usage` (JSON), `latency_ms`, `validation_failure` (boolean), `fallback_provider_usage` (boolean), `grounding_evidence_hash`, `estimated_cost`, `created_at`.
+- `ai_runs` collection: `_id` (ObjectId), `provider` (string), `model` (string), `prompt_version` (string), `output_schema_version` (string), `token_usage` (document), `latency_ms` (int), `validation_failure` (boolean), `fallback_provider_usage` (boolean), `grounding_evidence_hash` (string), `estimated_cost` (double), `created_at` (datetime).
 
 ---
 
@@ -897,7 +897,7 @@ This is not a standalone screen but a set of requirements applied across §6.2, 
 
 ## 9. Data Model Summary
 
-| Table / Collection | Purpose |
+| Collection | Purpose |
 |---|---|
 | `users` | Core authenticated user records (§6.1) |
 | `oauth_connections` | Encrypted access and refresh tokens isolated from user records (§6.1) |
@@ -924,30 +924,36 @@ Exact schema types, indexes, and migrations are left to engineering; the above d
 
 ## 10. API Surface Summary
 
+### Phase 1 Core APIs
 | Endpoint | Method | Purpose |
 |---|---|---|
-| `/api/auth/github/callback` | POST | OAuth login |
-| `/api/auth/logout` | POST | Logout |
-| `/api/auth/me` | GET | Current user |
-| `/api/profile/analyze` | POST | Trigger profile analysis |
-| `/api/profile/me` | GET | Get profile analysis |
-| `/api/recommendations` | GET | Get personalized recommendations |
-| `/api/recommendations/feedback` | POST | (TBD scope) dismiss/save signal |
-| `/api/repositories/:id` | GET | Repo detail + cached/triggered analysis |
-| `/api/repositories/:id/analyze` | POST | Force re-analysis |
-| `/api/repositories/:id/analysis-status` | GET | Poll analysis status |
-| `/api/repositories/:id/opportunities` | GET | Tiered contribution opportunities |
-| `/api/repositories/:id/state` | POST/DELETE/PATCH | Update/query user repository view/save/dismiss state |
-| `/api/blueprints` | POST | Generate Blueprint (v1 or new version under group ID) |
-| `/api/blueprints/:id` | GET | Retrieve a specific Blueprint version |
-| `/api/blueprints/group/:group_id` | GET | List versions of a blueprint group |
-| `/api/blueprints?user_id=me` | GET | List user's latest Blueprints |
-| `/api/blueprints/:id/jules-handoff` | GET | Formatted handoff payload |
-| `/api/dashboard` | GET | Aggregate dashboard data |
-| `/api/search` | GET | Manual repo search |
-| `/api/history/repositories` | GET | Recently viewed from repository states |
-| `/api/history/blueprints` | GET | Blueprint history (all versions) |
+| `/api/auth/webhook/clerk` | POST | Sync user from Clerk on OAuth event |
+| `/api/auth/me` | GET | Get current authenticated user details |
+| `/api/profile/analyze` | POST | Trigger asynchronous developer profile analysis |
+| `/api/profile/me` | GET | Get current profile analysis status and details |
+| `/api/profile/preferences` | PUT | Save manual profile onboarding preferences |
+| `/api/recommendations/generate` | POST | Trigger asynchronous recommendations generation |
+| `/api/recommendations` | GET | Get latest completed recommendations list |
+| `/api/recommendations/runs/:run_id` | GET | Retrieve recommendations from a specific run |
 | `/api/jobs/:id` | GET | Poll background job worker status |
+| `/api/dashboard` | GET | Aggregate dashboard data |
+
+### Phase 2 & 3 Deferred APIs
+| Endpoint | Method | Purpose |
+|---|---|---|
+| `/api/repositories/:id` | GET | [Phase 2] Repo detail + cached/triggered analysis |
+| `/api/repositories/:id/analyze` | POST | [Phase 2] Force re-analysis |
+| `/api/repositories/:id/analysis-status` | GET | [Phase 2] Poll analysis status |
+| `/api/repositories/:id/opportunities` | GET | [Phase 2] Tiered contribution opportunities |
+| `/api/repositories/:id/state` | POST/DELETE/PATCH | [Phase 2] Update/query user repository view/save/dismiss state |
+| `/api/blueprints` | POST | [Phase 3] Generate Blueprint (v1 or new version under group ID) |
+| `/api/blueprints/:id` | GET | [Phase 3] Retrieve a specific Blueprint version |
+| `/api/blueprints/group/:group_id` | GET | [Phase 3] List versions of a blueprint group |
+| `/api/blueprints?user_id=me` | GET | [Phase 3] List user's latest Blueprints |
+| `/api/blueprints/:id/jules-handoff` | GET | [Phase 3] Formatted handoff payload |
+| `/api/search` | GET | [Phase 2] Manual repo search |
+| `/api/history/repositories` | GET | [Phase 2] Recently viewed from repository states |
+| `/api/history/blueprints` | GET | [Phase 2/3] Blueprint history (all versions) |
 
 ---
 

@@ -124,35 +124,37 @@ sequenceDiagram
 
 ```mermaid
 flowchart TD
-    A["🔔 Trigger<br/>(First login or manual re-analysis)"] --> B["POST /api/profile/analyze"]
-    B --> C["202 Accepted<br/>{task_id, status: queued}"]
-    C --> D["⚙️ Background Worker"]
+    A["🔔 Trigger<br/>(First login or manual preferences fallback)"] --> B["POST /api/profile/analyze"]
+    B --> C["202 Accepted<br/>{job_id, status: queued}"]
+    C --> D["⚙️ Background Task Worker"]
     
     D --> E["Fetch GitHub Data"]
-    E --> E1["Repositories (owned)"]
-    E --> E2["Languages & frameworks"]
-    E --> E3["Commit history"]
-    E --> E4["PR & issue contributions"]
+    E --> E1["Repositories (owned/contributed)"]
+    E --> E2["Languages & technology stack"]
+    E --> E3["Commit history & frequencies"]
+    E --> E4["PR & issue activities"]
     
-    E1 & E2 & E3 & E4 --> F["🤖 LLM Analysis<br/>(Gemini)"]
+    E1 & E2 & E3 & E4 --> F["⚙️ Deterministic & Heuristic Parsing"]
     
-    F --> G["Generate Profile"]
-    G --> G1["Languages + weights + confidence"]
-    G --> G2["Frameworks + weights"]
-    G --> G3["Experience level<br/>(beginner/intermediate/advanced)"]
-    G --> G4["Project domains"]
-    G --> G5["Topics of interest"]
+    F --> G["Aggregate Skill Stats"]
+    G --> G1["Primary languages & usage weights"]
+    G --> G2["Framework familiarity & active topics"]
+    G --> G3["Heuristic Experience Level<br/>(based on codebase complexity & activity)"]
     
-    G1 & G2 & G3 & G4 & G5 --> H["💾 Save to MongoDB<br/>(developer_profiles)"]
-    H --> I["Status → complete"]
+    G1 & G2 & G3 --> H["🤖 Gemini LLM Profile Summarizer"]
+    H --> I["Generate readable summary & matching evidence reasons"]
+    
+    I & G1 & G2 & G3 --> J["💾 Save to MongoDB<br/>(developer_profiles & profile_snapshots)"]
+    J --> K["Update Job Status → completed"]
 
-    I --> J["Frontend polls<br/>GET /api/profile/me"]
-    J --> K["✅ Profile ready<br/>→ Dashboard loads"]
+    K --> L["Frontend polls<br/>GET /api/jobs/:job_id"]
+    L --> M["✅ Profile ready<br/>→ GET /api/profile/me<br/>→ Dashboard loads"]
 
     style A fill:#7c3aed,stroke:#a78bfa,color:#fff
     style D fill:#2563eb,stroke:#60a5fa,color:#fff
-    style F fill:#059669,stroke:#34d399,color:#fff
-    style H fill:#d97706,stroke:#fbbf24,color:#fff
+    style F fill:#0891b2,stroke:#22d3ee,color:#fff
+    style H fill:#059669,stroke:#34d399,color:#fff
+    style J fill:#d97706,stroke:#fbbf24,color:#fff
 ```
 
 ---
@@ -160,34 +162,37 @@ flowchart TD
 ## 5. Recommendation Engine Flow
 
 ```mermaid
-flowchart LR
-    subgraph Inputs["📥 Inputs"]
-        Profile["Developer Profile<br/>(languages, frameworks,<br/>experience, interests)"]
-        RepoPool["Repository Pool<br/>(eligible repos from<br/>quality gate)"]
+flowchart TD
+    subgraph Discovery["🔍 Candidate Ingestion & Quality Gates"]
+        A["Developer Profile"] --> B["GitHub Search Query Builder"]
+        B -->|"Live Query"| C["GitHub REST API"]
+        C --> D["Candidate Repository Pool"]
+        D --> E["Metadata Enrichment"]
+        E --> F["Eligibility Filter<br/>(Forks, Archived, Activity, License, README check)"]
+        F -->|"Rejected Candidates"| F1["Discarded Pool<br/>(Log Reasons)"]
+        F -->|"Accepted Candidates"| G["Eligible Repository Pool<br/>(Cached in MongoDB)"]
     end
 
-    subgraph Scoring["⚙️ Scoring Pipeline"]
-        LangMatch["Language Overlap<br/>Score"]
-        TopicMatch["Topic Similarity<br/>Score"]
-        DiffMatch["Difficulty Alignment<br/>Score"]
-        HealthMatch["Community Health<br/>Score"]
-        Composite["Composite Match %<br/>(weighted average)"]
+    subgraph Scoring["⚙️ Heuristic Scoring Pipeline"]
+        G --> H1["Language Similarity (30%)"]
+        G --> H2["Framework/Topic Match (20%)"]
+        G --> H3["Difficulty Alignment (15%)"]
+        G --> H4["Activity & Recency (10%)"]
+        G --> H5["Beginner Friendliness (10%)"]
+        G --> H6["Docs & Maintainer Health (15%)"]
+        
+        A --> H1 & H2 & H3
+        
+        H1 & H2 & H3 & H4 & H5 & H6 --> I["Heuristic Match Score (0-100)"]
     end
 
-    subgraph Output["📤 Output"]
-        Ranked["Ranked Recommendations"]
-        Reasons["Human-readable<br/>Explanations (LLM)"]
-        Confidence["Confidence Scores"]
+    subgraph Output["📤 Output Generation"]
+        I --> J["Rank & Deduplicate Recommendations"]
+        J -->|"Top Candidates"| K["🤖 Gemini LLM Explanations Generator"]
+        K --> L["Final Recommendations Document<br/>(Saved to MongoDB)"]
     end
 
-    Profile --> LangMatch & TopicMatch & DiffMatch
-    RepoPool --> LangMatch & TopicMatch & DiffMatch & HealthMatch
-    LangMatch & TopicMatch & DiffMatch & HealthMatch --> Composite
-    Composite --> Ranked
-    Composite -->|"Top N repos"| Reasons
-    Composite --> Confidence
-
-    style Inputs fill:#1e1b4b,stroke:#7c3aed,color:#e9d5ff
+    style Discovery fill:#1e1b4b,stroke:#7c3aed,color:#e9d5ff
     style Scoring fill:#0c4a6e,stroke:#0ea5e9,color:#e0f2fe
     style Output fill:#134e4a,stroke:#14b8a6,color:#ccfbf1
 ```
@@ -225,8 +230,10 @@ sequenceDiagram
         BE->>LLM: Generate AI summary<br/>(repo purpose, tech stack, health)
         LLM-->>BE: Structured analysis
 
-        BE->>LLM: Discover contribution opportunities<br/>(8-tier pipeline)
-        LLM-->>BE: Tiered opportunities list
+        BE->>BE: Query GitHub API for Issues (Tiers 1-3 Good First Issues/Help Wanted)
+        BE->>LLM: Generate Tier 8 AI-generated Suggestions (if confidence high)
+        LLM-->>BE: AI Suggestions (Tier 8)
+        BE->>BE: Merge and Prioritize Opportunities (Tiers 1-8)
 
         BE->>DB: Save repository_analyses
         BE->>DB: Save contribution_opportunities
@@ -787,6 +794,24 @@ Which service calls which external API:
 | `storj_service` | | | | | | ✅ |
 | `ai_service` | | ✅ | | | | |
 | `core/auth.py` | | | | ✅ | | |
+
+---
+
+## 13. Background Job Lifecycle (Durable Jobs)
+
+Durable tasks like profile analysis and recommendations generation track progress and leases through a database-backed state machine:
+
+```mermaid
+stateDiagram-v2
+    [*] --> Queued : POST request creates job document (queued)
+    Queued --> Running : Background task starts execution (worker claims lease, updates timestamp)
+    Running --> Completed : Job logic completes successfully (status → completed, saves results)
+    Running --> Failed : Job encounters recoverable error (status → failed, releases lease)
+    Failed --> Queued : Auto-retry queued if attempts < max_retries (increments attempt_count)
+    Failed --> DeadLetter : Job exceeds max_retries (status → dead_letter, logs diagnostic error)
+    Completed --> [*]
+    DeadLetter --> [*]
+```
 
 ---
 

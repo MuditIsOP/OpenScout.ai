@@ -313,15 +313,16 @@ Each service maps directly to a PRD feature. All services are stateless and rece
 
 ### 5.4 Background Task Architecture
 
-Profile analysis and repository analysis are long-running operations (10–30 seconds due to LLM calls + GitHub API crawling). These are handled via an async task pattern:
+Profile analysis and repository analysis are long-running operations (10–30 seconds due to LLM calls + GitHub API crawling). These are handled via a durable async task pattern using MongoDB:
 
-1. **Client sends request** → API returns `202 Accepted` immediately with a `task_id` and `status: "queued"`.
-2. **Worker picks up task** → Runs LLM analysis, GitHub crawling, scoring in the background.
-3. **Client polls for status** → `GET /status` returns `running`, `complete`, or `failed`.
-4. **On completion** → Worker writes results to MongoDB. Next poll returns the completed data.
+1. **Client sends request** → API creates a job record in the `background_jobs` collection with status `"queued"` and returns `202 Accepted` immediately with the `job_id`.
+2. **FastAPI BackgroundTask claims job** → Backend triggers a task in a separate background thread. The worker updates the job state in MongoDB to `"running"`, setting its lease and timeout details.
+3. **Worker executes logic** → Runs LLM analysis, GitHub crawling, scoring in the background.
+4. **Client polls for status** → Frontend queries `GET /api/jobs/:id`, which returns the current state (`queued`, `running`, `completed`, `failed`) directly from the MongoDB `background_jobs` collection.
+5. **On completion/failure** → The task updates the job document with the result or errors and updates status to `"completed"` or `"failed"`. Next poll returns the finished data.
 
-**MVP implementation:** FastAPI's built-in `BackgroundTasks`.
-**Production scale:** Celery + Redis or ARQ (async Redis queue).
+**MVP implementation:** FastAPI's built-in `BackgroundTasks` writing to the MongoDB `background_jobs` collection to guarantee durability and recoverability across backend restarts.
+**Production scale:** Dedicated worker process polling the MongoDB `background_jobs` collection (or Celery + Redis / ARQ).
 
 ### 5.5 Middleware & Cross-Cutting Concerns
 
@@ -329,7 +330,7 @@ Profile analysis and repository analysis are long-running operations (10–30 se
 |---|---|
 | `core/auth.py` | Clerk JWT verification. Fetches Clerk's public JWKS, validates token signature (RS256), checks audience and issuer, extracts `user_id` from claims. |
 | `core/rate_limiter.py` | GitHub API rate limit management. Tracks remaining quota, implements exponential backoff, and queues requests when approaching limits. |
-| `core/cache.py` | Analysis caching logic. Prevents redundant LLM calls for recently-analyzed repositories. Uses a TTL-based cache key on `repository_id + analysis_version`. |
+| `core/cache.py` | Analysis caching logic. Prevents redundant LLM calls for recently-analyzed repositories. Uses a TTL-based cache key on `repository_id + default_branch + commit_sha + analysis_version`. |
 | `core/exceptions.py` | Custom exception classes mapped to HTTP status codes. Provides structured error responses for the frontend. |
 
 ### 5.6 Key Backend Dependencies
@@ -891,25 +892,26 @@ All objects follow a predictable key structure for easy retrieval:
 
 Profile analysis and repository analysis involve multiple LLM calls and GitHub API requests, taking 10–30 seconds. The architecture uses an async task pattern:
 
-```
-Frontend                    Backend                     Worker
-   │                          │                           │
-   │── POST /analyze ────────>│                           │
-   │                          │── Queue task ────────────>│
-   │<── 202 Accepted ────────│                           │
-   │    {task_id, status}     │                           │
-   │                          │                     ┌─────┤
-   │                          │                     │ Run │
-   │                          │                     │ LLM │
-   │── GET /status ──────────>│                     │ ... │
-   │<── {status: "running"} ──│                     └─────┤
-   │                          │<── Update DB ────────────│
-   │── GET /status ──────────>│                           │
-   │<── {status: "complete"} ─│                           │
+```text
+Frontend                    Backend API                  MongoDB                  Background Task
+   │                          │                           │                             │
+   │── POST /analyze ────────>│                           │                             │
+   │                          │── Create job (queued) ───>│                             │
+   │<── 202 Accepted ────────│                           │                             │
+   │    {job_id, status}      │── Trigger task ───────────┼────────────────────────────>│
+   │                          │                           │                             │── Update job to "running"
+   │                          │                           │<── Write Status ────────────│
+   │── GET /api/jobs/:id ────>│                           │                             │
+   │<── {status: "running"} ──│── Query status ──────────>│                             │
+   │                          │                           │                             │── Execute job logic
+   │                          │                           │                             │── Update job to "completed"
+   │                          │                           │<── Write Results ───────────│
+   │── GET /api/jobs/:id ────>│                           │                             │
+   │<── {status: "complete"} ─│── Query status ──────────>│                             │
 ```
 
-**MVP:** FastAPI's built-in `BackgroundTasks`.
-**Production:** Celery + Redis or ARQ (async Redis queue).
+**MVP:** FastAPI's built-in `BackgroundTasks` executing tasks whose state and lifecycle are durably tracked in the MongoDB `background_jobs` collection.
+**Production:** Celery + Redis or ARQ (async Redis queue) polling the `background_jobs` collection.
 
 ### 9.5 CI/CD Pipeline
 
@@ -1074,87 +1076,86 @@ main              ← production-ready code
 
 ## 13. Phased Build Plan
 
-### Phase 1 — Foundation (Days 1–2)
+### Phase 1A — Foundation and Authentication (Days 1–2)
 
 | Task | Owner | Details |
 |---|---|---|
 | Initialize monorepo structure | Full Stack | Create folder structure, configs, READMEs |
 | Next.js + Tailwind setup | Frontend | Create-next-app, Tailwind config, design tokens, layout shell |
 | FastAPI skeleton | Backend | App entrypoint, CORS, health check endpoint, Pydantic settings |
-| MongoDB Atlas connection | Backend | Motor setup, connection module, index creation |
+| MongoDB connection | Backend | Motor setup, connection module, index creation |
 | Clerk integration | Full Stack | Frontend `<ClerkProvider>`, middleware, backend JWT verification |
-| Clerk webhook → user sync | Backend | `/api/auth/webhook/clerk` creates user in MongoDB |
-| Landing page | Frontend | Value prop, "Continue with GitHub" CTA |
+| Clerk webhook → user sync | Backend | `/api/auth/webhook/clerk` creates/syncs user in MongoDB |
+| Landing page | Frontend | Value prop, Clerk "Continue with GitHub" login CTA |
 
-**✅ Milestone:** User can sign in with GitHub via Clerk and a user record appears in MongoDB.
+**✅ Milestone:** User can sign in with GitHub via Clerk and their user record is synchronized to MongoDB.
 
 ---
 
-### Phase 2 — Profile Analysis & Recommendations (Days 3–5)
+### Phase 1B — Profile Analysis (Days 3–4)
 
 | Task | Owner | Details |
 |---|---|---|
 | GitHub API service | Backend | Fetch user repos, languages, commits, contribution data |
-| Profile analyzer service | Backend | Infer skills, experience level, confidence scores |
-| Profile API (`/api/profile/*`) | Backend | Trigger analysis, return results |
-| Eligibility filter | Backend | Pure function implementing quality gate (PRD §6.4) |
-| Recommendation engine | Backend | Scoring, ranking, explanation generation |
-| Recommendations API | Backend | `/api/recommendations` endpoint |
-| Dashboard page | Frontend | Skills module, recommendation cards, loading skeletons |
-| Confidence/Difficulty badges | Frontend | Reusable components for AI transparency |
+| Profile analyzer service | Backend | Infer skills, experience level, confidence scores from raw evidence |
+| Durable jobs queue setup | Backend | Create MongoDB `background_jobs` and wire FastAPI BackgroundTasks |
+| Profile API (`/api/profile/*`) | Backend | Trigger profile analysis job (`/api/profile/analyze`), check job status (`/api/jobs/:id`), return profile (`/api/profile/me`) |
+| Fallback preferences | Full Stack | Onboarding fallback flow: prompt user for manual preferences if GitHub data is sparse, save in `user_preferences`, blend into profile |
 
-**✅ Milestone:** User sees personalized repo recommendations with explanations on their dashboard.
+**✅ Milestone:** User profile analysis runs durably in the background, with manual fallback onboarding if GitHub data is empty.
 
 ---
 
-### Phase 3 — Repository Detail & Opportunities (Days 6–7)
+### Phase 1C — Eligibility and Recommendations (Days 5–6)
 
 | Task | Owner | Details |
 |---|---|---|
-| Repo analyzer service | Backend | AI-generated summary, tech stack, health signals |
-| Analysis caching | Backend | Cache per repo, invalidation logic, "last analyzed" timestamp |
-| Repository API | Backend | `/api/repositories/:id`, analysis trigger, status polling |
-| Opportunity discovery service | Backend | 8-tier contribution opportunity pipeline |
-| Repository detail page | Frontend | AI summary, tech stack tags, health signals, opportunities list |
-| Search API + page | Frontend + Backend | Manual search with eligibility indicators |
+| Candidate ingestion service | Backend | `candidate_repository_service` to build GitHub Search queries and fetch candidate repos, caching them in MongoDB |
+| Eligibility filter | Backend | Deterministic quality gate filter (public, not fork/archived, commit < 90 days, README > 500 chars, valid license, stars/forks count) |
+| Recommendation engine | Backend | Weighted heuristic scoring (languages, frameworks, interests, health) + Gemini explanation generator |
+| Recommendations API | Backend | `POST /api/recommendations/generate` (asynchronously queued) and `GET /api/recommendations` (returns latest completed run) |
 
-**✅ Milestone:** User can open a recommended repo and see AI-generated summary + contribution opportunities.
+**✅ Milestone:** Candidate repositories are fetched, filtered for quality, heuristically matched, and explained via Gemini LLM.
 
 ---
 
-### Phase 4 — Blueprint & Handoff (Days 8–9)
+### Phase 1D — Recommendation Dashboard (Days 7–8)
 
 | Task | Owner | Details |
 |---|---|---|
-| Blueprint generator service | Backend | Full structured blueprint from PRD §6.7 (all sections) |
-| Blueprint API | Backend | Generate, retrieve, list, update |
-| Blueprint detail page | Frontend | Progressive reveal, section layout, Jules handoff block |
-| Jules API integration service | Backend | `jules_handoff_service` — Jules REST API session creation, Source verification, per-user API key retrieval |
-| Jules handoff flow | Frontend | "Continue to Google Jules" button → loading state → redirect to Jules session (copy-paste fallback if API unavailable) |
-| Jules API key settings | Frontend | Settings page section for users to add/update/remove their Jules API key |
-| Storj integration | Backend | Blueprint PDF/Markdown export |
-| Blueprint export download | Frontend | Download button on blueprint page |
+| Dashboard layout | Frontend | Aggregate dashboard endpoint (`/api/dashboard`), skeleton loaders, user profile module |
+| Recommendation cards | Frontend | Card list showing match %, difficulty/confidence badges, and Gemini text explanation |
+| Job polling integration | Frontend | Poll `GET /api/jobs/:id` for profile and recommendation jobs, displaying progressive loading states |
 
-**✅ Milestone:** User generates a Contribution Blueprint and can hand off to Google Jules.
+**✅ Milestone:** Users can view their detected profile and interact with personalized repository recommendation cards on a polished dashboard.
 
 ---
 
-### Phase 5 — Polish & Ship (Days 10–11)
+### Phase 2 — Repository Detail & Opportunities (Days 9–10)
 
 | Task | Owner | Details |
 |---|---|---|
-| Saved history | Full Stack | Recently viewed, saved repos, past blueprints |
-| Error handling sweep | Full Stack | All edge cases from PRD §12 |
-| Loading states polish | Frontend | Skeletons, progressive reveals, micro-animations |
-| Analytics events | Full Stack | Instrument primary KPI funnel |
-| Responsive design pass | Frontend | Mobile and tablet layouts |
-| CI/CD pipelines | DevOps | GitHub Actions for lint, test, deploy |
-| Production deployment | DevOps | Vercel (frontend) + Railway/Render (backend) |
-| Documentation | Full Stack | API reference, local setup guide, deployment guide |
+| Repo analyzer service | Backend | AI codebase summaries and default branch / commit SHA caching |
+| Repository API | Backend | `/api/repositories/:id` with cached/on-open analysis |
+| Opportunity discovery service | Backend | 8-tier opportunity pipeline (Good First Issues, AI suggestions) |
+| Repository detail page | Frontend | AI summary, tech stack tags, opportunity table |
+| Search API & Saved History | Full Stack | Manual search, saving repositories, recently viewed history |
 
-**✅ Milestone:** Production-ready, demo-quality application deployed.
+**✅ Milestone:** User can click a recommendation to open a repository, read its AI-generated analysis, and browse available contribution opportunities.
 
 ---
+
+### Phase 3 — Blueprint & Handoff (Days 11–12)
+
+| Task | Owner | Details |
+|---|---|---|
+| Blueprint generator service | Backend | Full versioned blueprint generator (Gemini prompt versioning and file references) |
+| Blueprint API & UI | Full Stack | Generate, retrieve, list versions, and progressive loading view |
+| Jules API integration | Backend | Create Google Jules sessions via Jules REST API, verify source repository, handle deep-linking |
+| Jules handoff flow | Frontend | "Continue to Google Jules" redirection, copy-paste graceful fallback |
+| Storj integration | Backend | Blueprint PDF/Markdown export and S3-compatible storage |
+
+**✅ Milestone:** Complete end-to-end flow from login to generating a Contribution Blueprint and handing off to a Google Jules editing session.
 
 ## 14. Security Considerations
 
@@ -1237,7 +1238,7 @@ main              ← production-ready code
 | **Match Score** | A float (0–100) representing how well a repository matches a developer's profile, based on language overlap, topic similarity, difficulty alignment, and community health. |
 | **Opportunity** | A specific, actionable contribution opportunity within a repository (e.g., a good-first-issue, a documentation gap, a missing test). Categorized into 8 tiers of difficulty. |
 | **Profile Analysis** | The process of analyzing a developer's GitHub activity to infer skills, experience level, and interests. Produces the `developer_profiles` document. |
-| **Tier** | A difficulty level (1–8) for contribution opportunities, where Tier 1 is the easiest (e.g., typo fixes) and Tier 8 is the most complex (e.g., new feature implementation). |
+| **Tier** | A priority classification (1–8) for contribution opportunities based on source priority (such as existing Good First Issues, Help Wanted issues, doc updates, refactoring, and AI-generated ideas), rather than a strict complexity/difficulty ladder. |
 
 ---
 

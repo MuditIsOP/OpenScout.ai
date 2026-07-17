@@ -1,371 +1,365 @@
-# OpenScout.ai Database Schema Specifications
+# OpenScout.ai MongoDB Schema Specifications
 
-This document defines the schema for the 17 production database collections required by OpenScout.ai. It provides a production-ready SQL DDL specification to guarantee strict data types, nullability, relationships, constraints, and indexes. 
+This document defines the schema for the 17 production database collections required by OpenScout.ai. It provides a production-ready document-oriented MongoDB specification to guarantee strict data types, indexes, and logical constraints using MongoDB JSON Schema validators.
 
 ---
 
-## Final Collection List
+## Architecture Context
 
-The schema is divided into 17 collections/tables:
-1. **`users`**: Core user record.
+To align with a document-oriented architecture, MongoDB Atlas is the canonical database. 
+- Relations are modeled using `ObjectId` references.
+- Flexible JSON structures (such as LLM evidence, skill breakdowns, blueprint strategies, and token counters) are nested directly within parent documents.
+- Strict validation is enforced via MongoDB collection validation schemas.
+- Unique constraints are guaranteed through unique indexes.
+
+---
+
+## Phase Separation
+
+The 17 collections are separated by implementation phase:
+
+### Phase 1 Core Collections (11 Collections)
+1. **`users`**: Core user records synchronized from Clerk.
 2. **`oauth_connections`**: Encrypted OAuth access and refresh credentials.
-3. **`user_preferences`**: Developer preferences and fallback survey inputs.
-4. **`profile_snapshots`**: Immutable snapshots of source evidence for skills.
-5. **`developer_profiles`**: AI-inferred developer skill profile.
-6. **`repositories`**: Evaluated open-source repository metadata.
-7. **`repository_analyses`**: Commit-SHA specific AI-generated repository summaries.
-8. **`contribution_opportunities`**: Tiered opportunities (GitHub issues and AI suggestions).
-9. **`recommendation_runs`**: Parameterized runs used to generate recommendation batches.
-10. **`recommendations`**: Individual recommendations linked to a recommendation run.
-11. **`user_repository_states`**: Unified states (saved, viewed, dismissed, completed).
-12. **`blueprints`**: Versioned, non-overwriting Contribution Blueprints.
-13. **`handoff_events`**: Analytics and tracking for Jules handoffs.
-14. **`background_jobs`**: Durable, retriable task queue.
-15. **`ai_runs`**: Observability, token counting, and cost metrics for LLM queries.
-16. **`analytics_events`**: User behavior metrics and KPI funnels.
-17. **`audit_logs`**: Compliance and security log tracking.
+3. **`user_preferences`**: Developer preferences and fallback manual survey inputs.
+4. **`developer_profiles`**: Current AI-inferred developer skill profiles.
+5. **`profile_snapshots`**: Immutable snapshots of source evidence for skills.
+6. **`repositories`**: Evaluated open-source repository metadata and eligibility status.
+7. **`recommendation_runs`**: Parameterized runs used to generate recommendation batches.
+8. **`recommendations`**: Individual recommendations linked to a run.
+9. **`background_jobs`**: Durable task queue for async jobs.
+10. **`ai_runs`**: Observability, token counting, and cost metrics for LLM queries.
+11. **`analytics_events`**: User behavior metrics and KPI funnels.
+
+### Phase 2 & 3 Deferred Collections (6 Collections)
+12. **`repository_analyses`**: [Phase 2] AI-generated repository summaries.
+13. **`contribution_opportunities`**: [Phase 2] Prioritized issues (Tiers 1-8).
+14. **`user_repository_states`**: [Phase 2] Saved, viewed, and dismissed repository tracking states.
+15. **`blueprints`**: [Phase 3] Versioned, non-overwriting Contribution Blueprints.
+16. **`handoff_events`**: [Phase 3] Tracking for Google Jules handoffs.
+17. **`audit_logs`**: [Phase 2/3] Compliance and security log tracking.
 
 ---
 
-## SQL DDL Schema
+## MongoDB Collections & Schema Definitions
 
-```sql
--- Enable UUID extension if not enabled
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+### Phase 1 Core Collections
 
--- -------------------------------------------------------------
--- 1. users
--- -------------------------------------------------------------
-CREATE TABLE users (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    clerk_id VARCHAR(255) NOT NULL UNIQUE,
-    github_id VARCHAR(255) NOT NULL UNIQUE,
-    github_username VARCHAR(255) NOT NULL,
-    avatar_url TEXT,
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    last_login_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+#### 1. `users`
+Core user record, created/updated via Clerk OAuth sync webhooks.
+* **Fields:**
+  * `_id` (`ObjectId`): Primary key.
+  * `clerk_id` (`String`): Clerk's unique user identifier.
+  * `github_id` (`String`): GitHub's unique user identifier.
+  * `github_username` (`String`): GitHub username.
+  * `avatar_url` (`String`): URL of the user's GitHub avatar.
+  * `current_profile_job_id` (`ObjectId`, optional): Reference to the active profile analysis job.
+  * `profile_analysis_status` (`String`): Onboarding job status (`queued`, `in_progress`, `complete`, `failed`).
+  * `created_at` (`Date`): Creation timestamp.
+  * `last_login_at` (`Date`): Timestamp of the last sign-in.
+* **Indexes:**
+  * Unique index on `clerk_id`
+  * Unique index on `github_id`
 
-CREATE INDEX idx_users_clerk_id ON users(clerk_id);
-CREATE INDEX idx_users_github_id ON users(github_id);
+#### 2. `oauth_connections`
+Encrypted GitHub OAuth credentials linked to the user.
+* **Fields:**
+  * `_id` (`ObjectId`): Primary key.
+  * `user_id` (`ObjectId`): Reference to `users._id`.
+  * `provider` (`String`): Auth provider, defaults to `"github"`.
+  * `access_token` (`String`): Encrypted OAuth access token.
+  * `refresh_token` (`String`, optional): Encrypted OAuth refresh token.
+  * `scopes` (`Array` of `String`): List of granted scopes (e.g., `["read:user", "public_repo"]`).
+  * `token_status` (`String`): Status of the token (`"active"`, `"revoked"`, `"expired"`).
+  * `key_rotation_metadata` (`Document`): Contains rotation timestamps (`last_rotated`, `next_rotation_due`).
+  * `created_at` (`Date`): Creation timestamp.
+  * `updated_at` (`Date`): Update timestamp.
+* **Indexes:**
+  * Unique compound index on `{ user_id: 1, provider: 1 }`
 
--- -------------------------------------------------------------
--- 2. oauth_connections
--- -------------------------------------------------------------
-CREATE TABLE oauth_connections (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    provider VARCHAR(50) NOT NULL DEFAULT 'github',
-    access_token TEXT NOT NULL, -- Encrypted at rest
-    refresh_token TEXT,          -- Encrypted at rest
-    scopes VARCHAR(100)[] NOT NULL DEFAULT '{}',
-    token_status VARCHAR(50) NOT NULL DEFAULT 'active', -- active, revoked, expired
-    key_rotation_metadata JSONB NOT NULL DEFAULT '{}'::jsonb, -- last_rotated, next_rotation_due
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_user_provider UNIQUE (user_id, provider)
-);
+#### 3. `user_preferences`
+Fallback survey inputs and settings.
+* **Fields:**
+  * `_id` (`ObjectId`): Primary key.
+  * `user_id` (`ObjectId`): Reference to `users._id`.
+  * `skills` (`Array` of `String`): Self-selected skills.
+  * `languages` (`Array` of `String`): Target programming languages.
+  * `frameworks` (`Array` of `String`): Preferred frameworks.
+  * `interests` (`Array` of `String`): Open source domains of interest.
+  * `difficulty_preference` (`String`): Preferred difficulty level (`"beginner"`, `"intermediate"`, `"advanced"`).
+  * `jules_api_key` (`String`, optional): Encrypted Google Jules API key (deferred).
+  * `created_at` (`Date`): Creation timestamp.
+  * `updated_at` (`Date`): Update timestamp.
+* **Indexes:**
+  * Unique index on `user_id`
 
-CREATE INDEX idx_oauth_connections_user ON oauth_connections(user_id);
+#### 4. `developer_profiles`
+AI-inferred developer skill profiles blending GitHub evidence and manual fallback preferences.
+* **Fields:**
+  * `_id` (`ObjectId`): Primary key.
+  * `user_id` (`ObjectId`): Reference to `users._id`.
+  * `experience_level` (`String`): Inferred level (`"beginner"`, `"intermediate"`, `"advanced"`).
+  * `experience_confidence` (`Double`): Confidence score between `0.00` and `1.00`.
+  * `primary_languages` (`Array` of `String`): Inferred primary languages.
+  * `frameworks` (`Array` of `String`): Inferred frameworks.
+  * `skills` (`Array` of `String`): Combined inferred and manual skills.
+  * `interests` (`Array` of `String`): Combined domains of interest.
+  * `contribution_history_summary` (`Document`): Textual summary of past contributions and activities.
+  * `project_domains` (`Array` of `String`): Inferred domains (e.g., frontend, CLI, machine learning).
+  * `last_analyzed_at` (`Date`): Timestamp of the last profile analysis.
+  * `analysis_version` (`String`): Schema/prompt version for profile parsing.
+* **Indexes:**
+  * Unique index on `user_id`
 
--- -------------------------------------------------------------
--- 3. user_preferences
--- -------------------------------------------------------------
-CREATE TABLE user_preferences (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE UNIQUE,
-    skills VARCHAR(100)[] NOT NULL DEFAULT '{}',
-    languages VARCHAR(100)[] NOT NULL DEFAULT '{}',
-    frameworks VARCHAR(100)[] NOT NULL DEFAULT '{}',
-    interests VARCHAR(100)[] NOT NULL DEFAULT '{}',
-    contribution_preferences VARCHAR(100)[] NOT NULL DEFAULT '{}',
-    difficulty_preference VARCHAR(50) NOT NULL DEFAULT 'beginner', -- beginner, intermediate, advanced
-    jules_api_key TEXT, -- Encrypted at rest
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+#### 5. `profile_snapshots`
+Immutable log of evidence parsed during profile analysis runs.
+* **Fields:**
+  * `_id` (`ObjectId`): Primary key.
+  * `user_id` (`ObjectId`): Reference to `users._id`.
+  * `developer_profile_id` (`ObjectId`): Reference to `developer_profiles._id`.
+  * `inferred_skills` (`Document`): Detailed breakdown of skill categories with weights and confidence levels.
+  * `source_evidence` (`Document`): Evidence dictionary containing commit frequencies, PR links, and repos analyzed.
+  * `scoring_rationale` (`String`): Human-readable logic explaining the inferred classification.
+  * `created_at` (`Date`): Generation timestamp.
+* **Indexes:**
+  * Index on `{ user_id: 1, created_at: -1 }`
 
--- -------------------------------------------------------------
--- 4. developer_profiles
--- -------------------------------------------------------------
-CREATE TABLE developer_profiles (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE UNIQUE,
-    experience_level VARCHAR(50) NOT NULL, -- beginner, intermediate, advanced
-    experience_confidence NUMERIC(3, 2) NOT NULL, -- 0.00 to 1.00
-    contribution_history_summary JSONB NOT NULL DEFAULT '{}'::jsonb,
-    project_domains VARCHAR(100)[] NOT NULL DEFAULT '{}',
-    last_analyzed_at TIMESTAMP WITH TIME ZONE,
-    analysis_version VARCHAR(50) NOT NULL DEFAULT 'v1'
-);
+#### 6. `repositories`
+Local cache of evaluated open-source repositories dynamically queried from GitHub Search.
+* **Fields:**
+  * `_id` (`ObjectId`): Primary key.
+  * `github_repo_id` (`Int64`): Unique GitHub repository ID.
+  * `full_name` (`String`): Unique full path (e.g., `"facebook/react"`).
+  * `description` (`String`, optional): Repository description.
+  * `primary_language` (`String`): Primary coding language.
+  * `topics` (`Array` of `String`): Repository topics and tags.
+  * `stars` (`Int`): Star count.
+  * `forks` (`Int`): Fork count.
+  * `open_issues_count` (`Int`): Count of open GitHub issues.
+  * `last_commit_at` (`Date`): Last commit date (`pushed_at`).
+  * `license` (`String`, optional): License name (e.g., `"MIT"`).
+  * `is_fork` (`Boolean`): Whether the repository is a fork.
+  * `is_archived` (`Boolean`): Whether the repository is archived.
+  * `health_score` (`Double`): Computed health score (0-100).
+  * `beginner_friendly_score` (`Double`): Computed beginner friendliness score (0-100).
+  * `doc_quality_score` (`Double`): Computed documentation quality score (0-100).
+  * `size_kb` (`Int`): Bounded codebase size.
+  * `has_readme` (`Boolean`): Whether a README is present.
+  * `contributors_count` (`Int`): Total contributor count.
+  * `recent_contributors_count` (`Int`): Count of active contributors in the last 90 days.
+  * `good_first_issue_count` (`Int`): Active Good First Issue count.
+  * `help_wanted_issue_count` (`Int`): Active Help Wanted issue count.
+  * `eligibility_status` (`String`): Status (`"eligible"`, `"ineligible"`).
+  * `eligibility_reasons` (`Array` of `String`): Reasons for eligibility/ineligibility status.
+  * `cached_at` (`Date`): Cache timestamp.
+* **Indexes:**
+  * Unique index on `github_repo_id`
+  * Unique index on `full_name`
+  * Index on `{ eligibility_status: 1, primary_language: 1 }`
 
--- -------------------------------------------------------------
--- 5. profile_snapshots
--- -------------------------------------------------------------
-CREATE TABLE profile_snapshots (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    developer_profile_id UUID NOT NULL REFERENCES developer_profiles(id) ON DELETE CASCADE,
-    inferred_skills JSONB NOT NULL, -- Detailed languages, weights, confidence
-    source_evidence JSONB NOT NULL, -- The specific commit frequencies, PR links, repositories analyzed
-    scoring_rationale TEXT NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+#### 7. `recommendation_runs`
+Log of matching runs triggered by users.
+* **Fields:**
+  * `_id` (`ObjectId`): Primary key.
+  * `user_id` (`ObjectId`): Reference to `users._id`.
+  * `profile_snapshot_id` (`ObjectId`): Reference to `profile_snapshots._id`.
+  * `scoring_algorithm_version` (`String`): Version of the matching weights used.
+  * `filters_applied` (`Document`): Dictionary of filters selected (e.g., language, difficulty).
+  * `candidates_evaluated_count` (`Int`): Count of repository candidates evaluated.
+  * `idempotency_key` (`String`): Unique key generated per client request to prevent duplicate runs.
+  * `created_at` (`Date`): Generation timestamp.
+* **Indexes:**
+  * Unique index on `idempotency_key`
+  * Index on `{ user_id: 1, created_at: -1 }`
 
-CREATE INDEX idx_profile_snapshots_user ON profile_snapshots(user_id);
+#### 8. `recommendations`
+Individual repository recommendations belonging to a run.
+* **Fields:**
+  * `_id` (`ObjectId`): Primary key.
+  * `recommendation_run_id` (`ObjectId`): Reference to `recommendation_runs._id`.
+  * `user_id` (`ObjectId`): Reference to `users._id`.
+  * `repository_id` (`ObjectId`): Reference to `repositories._id`.
+  * `match_score` (`Double`): Match percentage (0.00 to 100.00).
+  * `confidence_score` (`Double`): Recommendation confidence (0.00 to 1.00).
+  * `reasons` (`Array` of `String`): Bullet points explaining the match.
+  * `created_at` (`Date`): Generation timestamp.
+* **Indexes:**
+  * Index on `{ recommendation_run_id: 1, match_score: -1 }`
+  * Unique compound index on `{ recommendation_run_id: 1, repository_id: 1 }`
 
--- -------------------------------------------------------------
--- 6. repositories
--- -------------------------------------------------------------
-CREATE TABLE repositories (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    github_repo_id BIGINT NOT NULL UNIQUE,
-    full_name VARCHAR(255) NOT NULL UNIQUE,
-    description TEXT,
-    primary_language VARCHAR(100),
-    topics VARCHAR(100)[] NOT NULL DEFAULT '{}',
-    stars INTEGER NOT NULL DEFAULT 0,
-    forks INTEGER NOT NULL DEFAULT 0,
-    open_issues_count INTEGER NOT NULL DEFAULT 0,
-    last_commit_at TIMESTAMP WITH TIME ZONE,
-    license VARCHAR(100),
-    is_fork BOOLEAN NOT NULL DEFAULT FALSE,
-    is_archived BOOLEAN NOT NULL DEFAULT FALSE,
-    health_score NUMERIC(5, 2) NOT NULL DEFAULT 0.00,
-    beginner_friendly_score NUMERIC(5, 2) NOT NULL DEFAULT 0.00,
-    doc_quality_score NUMERIC(5, 2) NOT NULL DEFAULT 0.00,
-    size_kb INTEGER NOT NULL DEFAULT 0,
-    eligibility_status VARCHAR(50) NOT NULL DEFAULT 'eligible', -- eligible, ineligible
-    eligibility_reasons TEXT[] NOT NULL DEFAULT '{}',
-    cached_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+#### 9. `background_jobs`
+Durable background job storage to poll progress and recover tasks.
+* **Fields:**
+  * `_id` (`ObjectId`): Primary key.
+  * `job_type` (`String`): Type (`"profile_analysis"`, `"recommendation_generation"`, `"repo_analysis"`, `"blueprint_generation"`).
+  * `status` (`String`): Status (`"queued"`, `"running"`, `"completed"`, `"failed"`, `"dead_letter"`).
+  * `retries` (`Int`): Max retries, defaults to `3`.
+  * `attempt_count` (`Int`): Active retry attempts.
+  * `idempotency_key` (`String`): Prevent duplicate job creation.
+  * `worker_lease` (`String`, optional): Identifier of the worker thread executing the job.
+  * `timeout` (`Int`): Max execution seconds before lease expiration.
+  * `dead_letter_state` (`Document`): Diagnostics details on persistent failures.
+  * `payload` (`Document`): Input data required for job processing.
+  * `created_at` (`Date`): Queued timestamp.
+  * `updated_at` (`Date`): State transition timestamp.
+* **Indexes:**
+  * Unique index on `idempotency_key`
+  * Index on `{ status: 1, created_at: 1 }`
 
-CREATE INDEX idx_repositories_eligibility ON repositories(eligibility_status);
-CREATE INDEX idx_repositories_primary_language ON repositories(primary_language);
+#### 10. `ai_runs`
+Token tracking and audit logs for LLM cost/observability.
+* **Fields:**
+  * `_id` (`ObjectId`): Primary key.
+  * `provider` (`String`): Provider name (`"gemini"`).
+  * `model` (`String`): Model name (`"gemini-1.5-flash"`).
+  * `prompt_version` (`String`): Version of system prompt used.
+  * `output_schema_version` (`String`): Version of schema verified.
+  * `token_usage` (`Document`): `{ input_tokens: Int, output_tokens: Int }`.
+  * `latency_ms` (`Int`): API latency in milliseconds.
+  * `validation_failure` (`Boolean`): Struct output parsing failure.
+  * `fallback_provider_usage` (`Boolean`): Fallback mechanism indicator.
+  * `grounding_evidence_hash` (`String`): SHA-256 hash of context inputs for security and deduplication.
+  * `estimated_cost` (`Double`): Calculated pricing.
+  * `created_at` (`Date`): Generation timestamp.
+* **Indexes:**
+  * Index on `{ provider: 1, model: 1, created_at: -1 }`
 
--- -------------------------------------------------------------
--- 7. repository_analyses
--- -------------------------------------------------------------
-CREATE TABLE repository_analyses (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    repository_id UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
-    default_branch VARCHAR(255) NOT NULL,
-    commit_sha VARCHAR(40) NOT NULL,
-    analysis_version VARCHAR(50) NOT NULL,
-    summary_text TEXT NOT NULL,
-    tech_stack VARCHAR(100)[] NOT NULL DEFAULT '{}',
-    activity_summary TEXT,
-    community_summary TEXT,
-    contribution_friendliness_score NUMERIC(5, 2) NOT NULL,
-    onboarding_difficulty VARCHAR(50) NOT NULL, -- easy, moderate, hard
-    confidence_score NUMERIC(3, 2) NOT NULL,
-    analyzed_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    cache_invalidated_at TIMESTAMP WITH TIME ZONE,
-    CONSTRAINT uq_repo_commit_version UNIQUE (repository_id, commit_sha, analysis_version)
-);
+#### 11. `analytics_events`
+KPI funnel tracking.
+* **Fields:**
+  * `_id` (`ObjectId`): Primary key.
+  * `user_id` (`ObjectId`, optional): Reference to `users._id`.
+  * `event_name` (`String`): Analytics action (`"auth_login_succeeded"`, `"profile_analysis_completed"`, `"recommendation_run_started"`, etc.).
+  * `payload` (`Document`): Detailed context parameters.
+  * `created_at` (`Date`): Trigger timestamp.
+* **Indexes:**
+  * Index on `{ event_name: 1, created_at: -1 }`
 
-CREATE INDEX idx_repository_analyses_lookup ON repository_analyses(repository_id, commit_sha, analysis_version);
+---
 
--- -------------------------------------------------------------
--- 8. contribution_opportunities
--- -------------------------------------------------------------
-CREATE TABLE contribution_opportunities (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    repository_id UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
-    repository_commit_sha VARCHAR(40) NOT NULL,
-    tier INTEGER NOT NULL, -- 1 to 8
-    source_type VARCHAR(50) NOT NULL, -- github_issue, ai_generated
-    github_issue_number INTEGER,
-    github_issue_url TEXT,
-    current_issue_state VARCHAR(50), -- open, closed
-    assignees VARCHAR(255)[] NOT NULL DEFAULT '{}',
-    linked_pull_requests TEXT[] NOT NULL DEFAULT '{}',
-    title VARCHAR(255) NOT NULL,
-    description TEXT NOT NULL,
-    confidence_score NUMERIC(3, 2), -- required for tier 8
-    estimated_difficulty VARCHAR(50) NOT NULL, -- easy, moderate, hard
-    last_issue_activity TIMESTAMP WITH TIME ZONE,
-    last_verification_time TIMESTAMP WITH TIME ZONE NOT NULL,
-    expiration_time TIMESTAMP WITH TIME ZONE,
-    relevant_verified_file_paths TEXT[] NOT NULL DEFAULT '{}',
-    is_possibly_claimed BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+### Phase 2 & 3 Deferred Collections
 
-CREATE INDEX idx_opportunities_repo ON contribution_opportunities(repository_id);
-CREATE INDEX idx_opportunities_tier ON contribution_opportunities(tier);
-CREATE INDEX idx_opportunities_lookup ON contribution_opportunities(repository_id, tier, current_issue_state);
+#### 12. `repository_analyses` [Phase 2]
+AI codebase summaries generated on repository open.
+* **Fields:**
+  * `_id` (`ObjectId`): Primary key.
+  * `repository_id` (`ObjectId`): Reference to `repositories._id`.
+  * `default_branch` (`String`): Branch name (e.g., `"main"`).
+  * `commit_sha` (`String`): Target Git SHA (40 chars).
+  * `analysis_version` (`String`): Prompts/schemas analyzer version.
+  * `summary_text` (`String`): AI-generated explanation.
+  * `tech_stack` (`Array` of `String`): Detected frameworks/libraries.
+  * `activity_summary` (`String`): Summary of commit frequency.
+  * `community_summary` (`String`): PR review and issues overview.
+  * `contribution_friendliness_score` (`Double`): Score (0-100).
+  * `onboarding_difficulty` (`String`): Difficulty (`"easy"`, `"moderate"`, `"hard"`).
+  * `confidence_score` (`Double`): LLM confidence (0.00 to 1.00).
+  * `analyzed_at` (`Date`): Analysis timestamp.
+  * `cache_invalidated_at` (`Date`, optional): Eviction timestamp.
+* **Indexes:**
+  * Unique compound index on `{ repository_id: 1, commit_sha: 1, analysis_version: 1 }`
 
--- -------------------------------------------------------------
--- 9. recommendation_runs
--- -------------------------------------------------------------
-CREATE TABLE recommendation_runs (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    profile_snapshot_id UUID NOT NULL REFERENCES profile_snapshots(id) ON DELETE CASCADE,
-    scoring_algorithm_version VARCHAR(50) NOT NULL,
-    filters_applied JSONB NOT NULL DEFAULT '{}'::jsonb,
-    candidates_evaluated_count INTEGER NOT NULL DEFAULT 0,
-    idempotency_key VARCHAR(255) NOT NULL UNIQUE,
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
+#### 13. `contribution_opportunities` [Phase 2]
+GitHub issues and AI-generated opportunities grouped into Tiers 1-8.
+* **Fields:**
+  * `_id` (`ObjectId`): Primary key.
+  * `repository_id` (`ObjectId`): Reference to `repositories._id`.
+  * `repository_commit_sha` (`String`): Target Git SHA (40 chars).
+  * `tier` (`Int`): Priority tier index (1 to 8).
+  * `source_type` (`String`): Source indicator (`"github_issue"`, `"ai_generated"`).
+  * `github_issue_number` (`Int`, optional): GitHub issue number.
+  * `github_issue_url` (`String`, optional): Link to GitHub.
+  * `current_issue_state` (`String`, optional): `"open"` or `"closed"`.
+  * `assignees` (`Array` of `String`): Assigned handles.
+  * `linked_pull_requests` (`Array` of `String`): Related PRs.
+  * `title` (`String`): Issue title.
+  * `description` (`String`): Detailed task requirements.
+  * `confidence_score` (`Double`, optional): Required for tier 8 AI suggestions.
+  * `estimated_difficulty` (`String`): Difficulty rating (`"easy"`, `"moderate"`, `"hard"`).
+  * `last_issue_activity` (`Date`, optional): GitHub updated_at.
+  * `last_verification_time` (`Date`): Last checked timestamp.
+  * `expiration_time` (`Date`, optional): Cleanup TTL.
+  * `relevant_verified_file_paths` (`Array` of `String`): Target code files.
+  * `is_possibly_claimed` (`Boolean`): Assignee/comment heuristics.
+  * `created_at` (`Date`): Creation timestamp.
+* **Indexes:**
+  * Index on `{ repository_id: 1, tier: 1, current_issue_state: 1 }`
 
-CREATE INDEX idx_reco_runs_user ON recommendation_runs(user_id);
+#### 14. `user_repository_states` [Phase 2]
+Tracks user engagement, saves, and dismissals for clean dashboard rendering.
+* **Fields:**
+  * `_id` (`ObjectId`): Primary key.
+  * `user_id` (`ObjectId`): Reference to `users._id`.
+  * `repository_id` (`ObjectId`): Reference to `repositories._id`.
+  * `is_saved` (`Boolean`): Save state indicator.
+  * `saved_at` (`Date`, optional): Timestamp of save.
+  * `is_viewed` (`Boolean`): View state indicator.
+  * `last_viewed_at` (`Date`, optional): Timestamp of last click.
+  * `recommendation_state` (`String`): Active visibility state (`"active"`, `"dismissed"`, `"completed"`).
+  * `created_at` (`Date`): Creation timestamp.
+  * `updated_at` (`Date`): Modify timestamp.
+* **Indexes:**
+  * Unique compound index on `{ user_id: 1, repository_id: 1 }`
+  * Index on `{ user_id: 1, is_saved: 1 }`
+  * Index on `{ user_id: 1, last_viewed_at: -1 }`
 
--- -------------------------------------------------------------
--- 10. recommendations
--- -------------------------------------------------------------
-CREATE TABLE recommendations (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    recommendation_run_id UUID NOT NULL REFERENCES recommendation_runs(id) ON DELETE CASCADE,
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    repository_id UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
-    match_score NUMERIC(5, 2) NOT NULL,
-    confidence_score NUMERIC(3, 2) NOT NULL,
-    reasons TEXT[] NOT NULL DEFAULT '{}',
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_run_repo UNIQUE (recommendation_run_id, repository_id)
-);
+#### 15. `blueprints` [Phase 3]
+Versioned, immutable contribution blueprints.
+* **Fields:**
+  * `_id` (`ObjectId`): Primary key.
+  * `blueprint_group_id` (`ObjectId`): Group UUID for tracking version chains.
+  * `version` (`Int`): Auto-incrementing version number.
+  * `supersedes_blueprint_id` (`ObjectId`, optional): Reference to `blueprints._id`.
+  * `user_id` (`ObjectId`): Reference to `users._id`.
+  * `repository_id` (`ObjectId`): Reference to `repositories._id`.
+  * `repository_commit_sha` (`String`): Commit SHA of target codebase state.
+  * `opportunity_id` (`ObjectId`): Reference to `contribution_opportunities._id`.
+  * `prompt_version` (`String`): Version of system blueprint generator prompt.
+  * `output_schema_version` (`String`): Schema tracking key.
+  * `repository_understanding` (`String`): Summary of architecture files.
+  * `match_explanation` (`String`): Why user fits this task.
+  * `confidence_level` (`Double`): Accuracy confidence (0.00 to 1.00).
+  * `estimated_difficulty` (`String`): Difficulty rating (`"easy"`, `"moderate"`, `"hard"`).
+  * `estimated_effort` (`String`): Effort scale (e.g., `"2-4 hours"`).
+  * `learning_objectives` (`Array` of `String`): Focus areas.
+  * `constraints` (`Array` of `String`): Project styling/architecture constraints.
+  * `suggested_reading_order` (`Array` of `Document`): List of `{ file: String, reason: String }`.
+  * `implementation_strategy` (`String`): Multi-step instruction plan.
+  * `final_jules_prompt` (`String`): Packaged context for Google Jules.
+  * `idempotency_key` (`String`): Prevent duplicate blueprint jobs.
+  * `status` (`String`): Status (`"generating"`, `"complete"`, `"failed"`).
+  * `created_at` (`Date`): Generation timestamp.
+* **Indexes:**
+  * Unique compound index on `{ blueprint_group_id: 1, version: 1 }`
+  * Unique index on `idempotency_key`
+  * Index on `{ user_id: 1, created_at: -1 }`
 
-CREATE INDEX idx_recommendations_lookup ON recommendations(user_id, match_score DESC);
-CREATE INDEX idx_recommendations_run ON recommendations(recommendation_run_id);
+#### 16. `handoff_events` [Phase 3]
+Tracks transitions to Google Jules sessions.
+* **Fields:**
+  * `_id` (`ObjectId`): Primary key.
+  * `blueprint_id` (`ObjectId`): Reference to `blueprints._id`.
+  * `method` (`String`): Session creation path (`"api"`, `"copy"`).
+  * `jules_session_id` (`String`, optional): Target session ID on Jules.
+  * `jules_session_url` (`String`, optional): Deep link to Jules UI.
+  * `error_reason` (`String`, optional): Fallback reasons (`"api_key_missing"`, `"api_error"`, etc.).
+  * `idempotency_key` (`String`): Prevent duplicate logging.
+  * `initiated_at` (`Date`): Handoff timestamp.
+* **Indexes:**
+  * Unique index on `idempotency_key`
+  * Index on `blueprint_id`
 
--- -------------------------------------------------------------
--- 11. user_repository_states
--- -------------------------------------------------------------
-CREATE TABLE user_repository_states (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    repository_id UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
-    is_saved BOOLEAN NOT NULL DEFAULT FALSE,
-    saved_at TIMESTAMP WITH TIME ZONE,
-    is_viewed BOOLEAN NOT NULL DEFAULT FALSE,
-    last_viewed_at TIMESTAMP WITH TIME ZONE,
-    recommendation_state VARCHAR(50) NOT NULL DEFAULT 'active', -- active, dismissed, completed
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_user_repo UNIQUE (user_id, repository_id)
-);
-
-CREATE INDEX idx_user_repo_states_saved ON user_repository_states(user_id) WHERE is_saved = TRUE;
-CREATE INDEX idx_user_repo_states_viewed ON user_repository_states(user_id, last_viewed_at DESC) WHERE is_viewed = TRUE;
-
--- -------------------------------------------------------------
--- 12. blueprints
--- -------------------------------------------------------------
-CREATE TABLE blueprints (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    blueprint_group_id UUID NOT NULL,
-    version INTEGER NOT NULL DEFAULT 1,
-    supersedes_blueprint_id UUID REFERENCES blueprints(id) ON DELETE SET NULL,
-    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    repository_id UUID NOT NULL REFERENCES repositories(id) ON DELETE CASCADE,
-    repository_commit_sha VARCHAR(40) NOT NULL,
-    opportunity_id UUID NOT NULL REFERENCES contribution_opportunities(id) ON DELETE CASCADE,
-    prompt_version VARCHAR(50) NOT NULL,
-    output_schema_version VARCHAR(50) NOT NULL,
-    repository_understanding TEXT NOT NULL,
-    match_explanation TEXT NOT NULL,
-    confidence_level NUMERIC(3, 2) NOT NULL,
-    estimated_difficulty VARCHAR(50) NOT NULL, -- easy, moderate, hard
-    estimated_effort VARCHAR(100) NOT NULL,    -- e.g. "2-4 hours"
-    learning_objectives TEXT[] NOT NULL DEFAULT '{}',
-    constraints TEXT[] NOT NULL DEFAULT '{}',
-    suggested_reading_order JSONB NOT NULL DEFAULT '[]'::jsonb, -- Array of {file, reason}
-    implementation_strategy TEXT NOT NULL,
-    final_jules_prompt TEXT NOT NULL,
-    idempotency_key VARCHAR(255) NOT NULL UNIQUE,
-    status VARCHAR(50) NOT NULL DEFAULT 'generating', -- generating, complete, failed
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    CONSTRAINT uq_group_version UNIQUE (blueprint_group_id, version)
-);
-
-CREATE INDEX idx_blueprints_user ON blueprints(user_id);
-CREATE INDEX idx_blueprints_lookup ON blueprints(blueprint_group_id, version DESC);
-
--- -------------------------------------------------------------
--- 13. handoff_events
--- -------------------------------------------------------------
-CREATE TABLE handoff_events (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    blueprint_id UUID NOT NULL REFERENCES blueprints(id) ON DELETE CASCADE,
-    method VARCHAR(50) NOT NULL, -- api, copy
-    jules_session_id VARCHAR(255),
-    jules_session_url TEXT,
-    error_reason VARCHAR(255), -- api_key_missing, repo_not_connected, api_error, none
-    idempotency_key VARCHAR(255) NOT NULL UNIQUE,
-    initiated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX idx_handoffs_blueprint ON handoff_events(blueprint_id);
-
--- -------------------------------------------------------------
--- 14. background_jobs
--- -------------------------------------------------------------
-CREATE TABLE background_jobs (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    job_type VARCHAR(100) NOT NULL, -- profile_analysis, repo_analysis, opportunity_discovery, blueprint_generation
-    status VARCHAR(50) NOT NULL DEFAULT 'queued', -- queued, running, completed, failed, dead_letter
-    retries INTEGER NOT NULL DEFAULT 3,
-    attempt_count INTEGER NOT NULL DEFAULT 0,
-    idempotency_key VARCHAR(255) NOT NULL UNIQUE,
-    worker_lease VARCHAR(255),
-    timeout INTEGER NOT NULL, -- in seconds
-    dead_letter_state JSONB NOT NULL DEFAULT '{}'::jsonb,
-    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX idx_jobs_status_retry ON background_jobs(status, created_at) WHERE status IN ('queued', 'failed');
-CREATE INDEX idx_jobs_idempotency ON background_jobs(idempotency_key);
-
--- -------------------------------------------------------------
--- 15. ai_runs
--- -------------------------------------------------------------
-CREATE TABLE ai_runs (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    provider VARCHAR(100) NOT NULL, -- gemini, openai
-    model VARCHAR(100) NOT NULL,
-    prompt_version VARCHAR(50) NOT NULL,
-    output_schema_version VARCHAR(50) NOT NULL,
-    token_usage JSONB NOT NULL DEFAULT '{}'::jsonb, -- e.g. {"input_tokens": 12, "output_tokens": 34}
-    latency_ms INTEGER NOT NULL,
-    validation_failure BOOLEAN NOT NULL DEFAULT FALSE,
-    fallback_provider_usage BOOLEAN NOT NULL DEFAULT FALSE,
-    grounding_evidence_hash VARCHAR(64),
-    estimated_cost NUMERIC(10, 6) NOT NULL DEFAULT 0.000000,
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX idx_ai_runs_perf ON ai_runs(provider, model, latency_ms);
-
--- -------------------------------------------------------------
--- 16. analytics_events
--- -------------------------------------------------------------
-CREATE TABLE analytics_events (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
-    event_name VARCHAR(100) NOT NULL,
-    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX idx_analytics_funnel ON analytics_events(event_name, created_at);
-
--- -------------------------------------------------------------
--- 17. audit_logs
--- -------------------------------------------------------------
-CREATE TABLE audit_logs (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    user_id UUID REFERENCES users(id) ON DELETE SET NULL,
-    action VARCHAR(255) NOT NULL,
-    resource_type VARCHAR(100) NOT NULL,
-    resource_id VARCHAR(255),
-    ip_address VARCHAR(45),
-    user_agent TEXT,
-    payload JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX idx_audit_lookup ON audit_logs(user_id, action, created_at);
+#### 17. `audit_logs` [Phase 2/3]
+Auditing security and account changes.
+* **Fields:**
+  * `_id` (`ObjectId`): Primary key.
+  * `user_id` (`ObjectId`, optional): Reference to `users._id`.
+  * `action` (`String`): Action keyword (e.g., `"oauth_revoke"`, `"account_delete"`).
+  * `resource_type` (`String`): Affected collection name.
+  * `resource_id` (`String`): Stringified identifier.
+  * `ip_address` (`String`): Request IP (IPv4/IPv6).
+  * `user_agent` (`String`): Request browser string.
+  * `payload` (`Document`): Supplementary auditing parameters.
+  * `created_at` (`Date`): Action timestamp.
+* **Indexes:**
+  * Index on `{ user_id: 1, action: 1, created_at: -1 }`

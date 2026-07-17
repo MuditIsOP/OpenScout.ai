@@ -1,0 +1,317 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "OpenScout.ai Phase 1 MongoDB Schema",
+  "description": "Schema definitions and index configurations for the 11 core collections required for OpenScout.ai Phase 1.",
+  "collections": {
+    "users": {
+      "description": "Core user records synchronized from Clerk.",
+      "validator": {
+        "bsonType": "object",
+        "required": ["clerk_id", "github_id", "github_username", "profile_analysis_status", "created_at", "last_login_at"],
+        "properties": {
+          "_id": { "bsonType": "objectId" },
+          "clerk_id": { "bsonType": "string" },
+          "github_id": { "bsonType": "string" },
+          "github_username": { "bsonType": "string" },
+          "avatar_url": { "bsonType": ["string", "null"] },
+          "current_profile_job_id": { "bsonType": ["objectId", "null"] },
+          "profile_analysis_status": { "enum": ["queued", "in_progress", "complete", "failed"] },
+          "created_at": { "bsonType": "date" },
+          "last_login_at": { "bsonType": "date" }
+        }
+      },
+      "indexes": [
+        { "key": { "clerk_id": 1 }, "unique": true },
+        { "key": { "github_id": 1 }, "unique": true }
+      ]
+    },
+    "oauth_connections": {
+      "description": "Encrypted OAuth access and refresh credentials.",
+      "validator": {
+        "bsonType": "object",
+        "required": ["user_id", "provider", "access_token", "scopes", "token_status", "created_at", "updated_at"],
+        "properties": {
+          "_id": { "bsonType": "objectId" },
+          "user_id": { "bsonType": "objectId" },
+          "provider": { "bsonType": "string" },
+          "access_token": { "bsonType": "string" },
+          "refresh_token": { "bsonType": ["string", "null"] },
+          "scopes": {
+            "bsonType": "array",
+            "items": { "bsonType": "string" }
+          },
+          "token_status": { "enum": ["active", "revoked", "expired"] },
+          "key_rotation_metadata": {
+            "bsonType": "object",
+            "properties": {
+              "last_rotated": { "bsonType": "date" },
+              "next_rotation_due": { "bsonType": "date" }
+            }
+          },
+          "created_at": { "bsonType": "date" },
+          "updated_at": { "bsonType": "date" }
+        }
+      },
+      "indexes": [
+        { "key": { "user_id": 1, "provider": 1 }, "unique": true }
+      ]
+    },
+    "user_preferences": {
+      "description": "Onboarding inputs and manual preference fallback setup.",
+      "validator": {
+        "bsonType": "object",
+        "required": ["user_id", "skills", "languages", "frameworks", "interests", "difficulty_preference", "created_at", "updated_at"],
+        "properties": {
+          "_id": { "bsonType": "objectId" },
+          "user_id": { "bsonType": "objectId" },
+          "skills": {
+            "bsonType": "array",
+            "items": { "bsonType": "string" }
+          },
+          "languages": {
+            "bsonType": "array",
+            "items": { "bsonType": "string" }
+          },
+          "frameworks": {
+            "bsonType": "array",
+            "items": { "bsonType": "string" }
+          },
+          "interests": {
+            "bsonType": "array",
+            "items": { "bsonType": "string" }
+          },
+          "difficulty_preference": { "enum": ["beginner", "intermediate", "advanced"] },
+          "created_at": { "bsonType": "date" },
+          "updated_at": { "bsonType": "date" }
+        }
+      },
+      "indexes": [
+        { "key": { "user_id": 1 }, "unique": true }
+      ]
+    },
+    "developer_profiles": {
+      "description": "Current AI-inferred developer profile and skills.",
+      "validator": {
+        "bsonType": "object",
+        "required": ["user_id", "experience_level", "experience_confidence", "primary_languages", "frameworks", "skills", "interests", "last_analyzed_at", "analysis_version"],
+        "properties": {
+          "_id": { "bsonType": "objectId" },
+          "user_id": { "bsonType": "objectId" },
+          "experience_level": { "enum": ["beginner", "intermediate", "advanced"] },
+          "experience_confidence": {
+            "bsonType": "double",
+            "minimum": 0.0,
+            "maximum": 1.0
+          },
+          "primary_languages": {
+            "bsonType": "array",
+            "items": { "bsonType": "string" }
+          },
+          "frameworks": {
+            "bsonType": "array",
+            "items": { "bsonType": "string" }
+          },
+          "skills": {
+            "bsonType": "array",
+            "items": { "bsonType": "string" }
+          },
+          "interests": {
+            "bsonType": "array",
+            "items": { "bsonType": "string" }
+          },
+          "contribution_history_summary": { "bsonType": "object" },
+          "project_domains": {
+            "bsonType": "array",
+            "items": { "bsonType": "string" }
+          },
+          "last_analyzed_at": { "bsonType": "date" },
+          "analysis_version": { "bsonType": "string" }
+        }
+      },
+      "indexes": [
+        { "key": { "user_id": 1 }, "unique": true }
+      ]
+    },
+    "profile_snapshots": {
+      "description": "Immutable snap log containing evidence parsed during profile run.",
+      "validator": {
+        "bsonType": "object",
+        "required": ["user_id", "developer_profile_id", "inferred_skills", "source_evidence", "scoring_rationale", "created_at"],
+        "properties": {
+          "_id": { "bsonType": "objectId" },
+          "user_id": { "bsonType": "objectId" },
+          "developer_profile_id": { "bsonType": "objectId" },
+          "inferred_skills": { "bsonType": "object" },
+          "source_evidence": { "bsonType": "object" },
+          "scoring_rationale": { "bsonType": "string" },
+          "created_at": { "bsonType": "date" }
+        }
+      },
+      "indexes": [
+        { "key": { "user_id": 1, "created_at": -1 } }
+      ]
+    },
+    "repositories": {
+      "description": "Cache of evaluated repositories from GitHub Search.",
+      "validator": {
+        "bsonType": "object",
+        "required": ["github_repo_id", "full_name", "stars", "forks", "open_issues_count", "health_score", "beginner_friendly_score", "doc_quality_score", "size_kb", "has_readme", "contributors_count", "recent_contributors_count", "good_first_issue_count", "help_wanted_issue_count", "eligibility_status", "eligibility_reasons", "cached_at"],
+        "properties": {
+          "_id": { "bsonType": "objectId" },
+          "github_repo_id": { "bsonType": "long" },
+          "full_name": { "bsonType": "string" },
+          "description": { "bsonType": ["string", "null"] },
+          "primary_language": { "bsonType": ["string", "null"] },
+          "topics": {
+            "bsonType": "array",
+            "items": { "bsonType": "string" }
+          },
+          "stars": { "bsonType": "int" },
+          "forks": { "bsonType": "int" },
+          "open_issues_count": { "bsonType": "int" },
+          "last_commit_at": { "bsonType": ["date", "null"] },
+          "license": { "bsonType": ["string", "null"] },
+          "is_fork": { "bsonType": "bool" },
+          "is_archived": { "bsonType": "bool" },
+          "health_score": { "bsonType": "double", "minimum": 0.0, "maximum": 100.0 },
+          "beginner_friendly_score": { "bsonType": "double", "minimum": 0.0, "maximum": 100.0 },
+          "doc_quality_score": { "bsonType": "double", "minimum": 0.0, "maximum": 100.0 },
+          "size_kb": { "bsonType": "int" },
+          "has_readme": { "bsonType": "bool" },
+          "contributors_count": { "bsonType": "int" },
+          "recent_contributors_count": { "bsonType": "int" },
+          "good_first_issue_count": { "bsonType": "int" },
+          "help_wanted_issue_count": { "bsonType": "int" },
+          "eligibility_status": { "enum": ["eligible", "ineligible"] },
+          "eligibility_reasons": {
+            "bsonType": "array",
+            "items": { "bsonType": "string" }
+          },
+          "cached_at": { "bsonType": "date" }
+        }
+      },
+      "indexes": [
+        { "key": { "github_repo_id": 1 }, "unique": true },
+        { "key": { "full_name": 1 }, "unique": true },
+        { "key": { "eligibility_status": 1, "primary_language": 1 } }
+      ]
+    },
+    "recommendation_runs": {
+      "description": "Log of user recommendation runs.",
+      "validator": {
+        "bsonType": "object",
+        "required": ["user_id", "profile_snapshot_id", "scoring_algorithm_version", "candidates_evaluated_count", "idempotency_key", "created_at"],
+        "properties": {
+          "_id": { "bsonType": "objectId" },
+          "user_id": { "bsonType": "objectId" },
+          "profile_snapshot_id": { "bsonType": "objectId" },
+          "scoring_algorithm_version": { "bsonType": "string" },
+          "filters_applied": { "bsonType": "object" },
+          "candidates_evaluated_count": { "bsonType": "int" },
+          "idempotency_key": { "bsonType": "string" },
+          "created_at": { "bsonType": "date" }
+        }
+      },
+      "indexes": [
+        { "key": { "idempotency_key": 1 }, "unique": true },
+        { "key": { "user_id": 1, "created_at": -1 } }
+      ]
+    },
+    "recommendations": {
+      "description": "Individual recommendations belonging to a run.",
+      "validator": {
+        "bsonType": "object",
+        "required": ["recommendation_run_id", "user_id", "repository_id", "match_score", "confidence_score", "reasons", "created_at"],
+        "properties": {
+          "_id": { "bsonType": "objectId" },
+          "recommendation_run_id": { "bsonType": "objectId" },
+          "user_id": { "bsonType": "objectId" },
+          "repository_id": { "bsonType": "objectId" },
+          "match_score": { "bsonType": "double", "minimum": 0.0, "maximum": 100.0 },
+          "confidence_score": { "bsonType": "double", "minimum": 0.0, "maximum": 1.0 },
+          "reasons": {
+            "bsonType": "array",
+            "items": { "bsonType": "string" }
+          },
+          "created_at": { "bsonType": "date" }
+        }
+      },
+      "indexes": [
+        { "key": { "recommendation_run_id": 1, "repository_id": 1 }, "unique": true },
+        { "key": { "recommendation_run_id": 1, "match_score": -1 } }
+      ]
+    },
+    "background_jobs": {
+      "description": "Durable background task list for status and recovery.",
+      "validator": {
+        "bsonType": "object",
+        "required": ["job_type", "status", "retries", "attempt_count", "idempotency_key", "timeout", "created_at", "updated_at"],
+        "properties": {
+          "_id": { "bsonType": "objectId" },
+          "job_type": { "enum": ["profile_analysis", "recommendation_generation", "repo_analysis", "blueprint_generation"] },
+          "status": { "enum": ["queued", "running", "completed", "failed", "dead_letter"] },
+          "retries": { "bsonType": "int", "minimum": 0 },
+          "attempt_count": { "bsonType": "int", "minimum": 0 },
+          "idempotency_key": { "bsonType": "string" },
+          "worker_lease": { "bsonType": ["string", "null"] },
+          "timeout": { "bsonType": "int" },
+          "dead_letter_state": { "bsonType": "object" },
+          "payload": { "bsonType": "object" },
+          "created_at": { "bsonType": "date" },
+          "updated_at": { "bsonType": "date" }
+        }
+      },
+      "indexes": [
+        { "key": { "idempotency_key": 1 }, "unique": true },
+        { "key": { "status": 1, "created_at": 1 } }
+      ]
+    },
+    "ai_runs": {
+      "description": "Token and cost observability log.",
+      "validator": {
+        "bsonType": "object",
+        "required": ["provider", "model", "prompt_version", "output_schema_version", "latency_ms", "validation_failure", "fallback_provider_usage", "estimated_cost", "created_at"],
+        "properties": {
+          "_id": { "bsonType": "objectId" },
+          "provider": { "bsonType": "string" },
+          "model": { "bsonType": "string" },
+          "prompt_version": { "bsonType": "string" },
+          "output_schema_version": { "bsonType": "string" },
+          "token_usage": {
+            "bsonType": "object",
+            "properties": {
+              "input_tokens": { "bsonType": "int" },
+              "output_tokens": { "bsonType": "int" }
+            }
+          },
+          "latency_ms": { "bsonType": "int" },
+          "validation_failure": { "bsonType": "bool" },
+          "fallback_provider_usage": { "bsonType": "bool" },
+          "grounding_evidence_hash": { "bsonType": ["string", "null"] },
+          "estimated_cost": { "bsonType": "double" },
+          "created_at": { "bsonType": "date" }
+        }
+      },
+      "indexes": [
+        { "key": { "provider": 1, "model": 1, "created_at": -1 } }
+      ]
+    },
+    "analytics_events": {
+      "description": "KPI funnel logging.",
+      "validator": {
+        "bsonType": "object",
+        "required": ["event_name", "created_at"],
+        "properties": {
+          "_id": { "bsonType": "objectId" },
+          "user_id": { "bsonType": ["objectId", "null"] },
+          "event_name": { "bsonType": "string" },
+          "payload": { "bsonType": "object" },
+          "created_at": { "bsonType": "date" }
+        }
+      },
+      "indexes": [
+        { "key": { "event_name": 1, "created_at": -1 } }
+      ]
+    }
+  }
+}
