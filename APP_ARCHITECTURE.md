@@ -480,6 +480,8 @@ erDiagram
         string github_id UK
         string github_username
         string avatar_url
+        string current_profile_job_id
+        string profile_analysis_status
         datetime created_at
         datetime last_login_at
     }
@@ -815,4 +817,4 @@ stateDiagram-v2
 
 ---
 
-*This document provides the visual architecture companion to [TECHNICAL_GUIDE.md](file:///d:/OpenScout.ai-main/OpenScout.ai-main/OpenScout.ai/TECHNICAL_GUIDE.md) and [PRD.md](file:///d:/OpenScout.ai-main/OpenScout.ai-main/OpenScout.ai/PRD.md). All diagrams reflect the API-driven Jules integration strategy.*
+*This document provides the visual architecture companion to [TECHNICAL_GUIDE.md](./TECHNICAL_GUIDE.md) and [PRD.md](./PRD.md). All diagrams reflect the API-driven Jules integration strategy.*

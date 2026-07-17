@@ -233,7 +233,7 @@ Each feature below includes functional requirements, user stories, acceptance cr
 - FR-2.3: Analysis runs asynchronously after login; user is not blocked waiting for it to complete.
 - FR-2.4: Analysis output must include a confidence indicator per inferred attribute, consistent with the platform-wide AI Principles (§9).
 - FR-2.5: Analysis results are persisted and displayed on the dashboard (§6.9) as the "detected skills" summary.
-- FR-2.6: Analysis should be refreshed on a defined cadence or trigger (TBD: exact refresh policy — e.g., on each login if last analysis is older than N days). Recommendation: refresh if analysis is >7 days old, configurable.
+- FR-2.6: Profile analysis automatically refreshes on user login if the existing analysis is older than 7 days, or when manually triggered by the user.
 - FR-2.7: For every profile analysis run, the system must generate and persist an immutable evidence snapshot (`profile_snapshots`) capturing the source evidence (GitHub repositories examined, commit frequencies, issue details, PR contributions, language statistics) and the scoring rationale to explain and reproduce user classifications.
 
 
@@ -369,7 +369,7 @@ Each feature below includes functional requirements, user stories, acceptance cr
   - Healthy contribution history
   - Sufficient community activity
   - Meaningful contribution opportunities available
-- FR-4.2: Ineligible repositories must never appear in recommendations or (by default) in search result ranking prominence (TBD: whether manual search should still surface ineligible repos with a warning label, vs. excluding entirely — recommend excluding entirely for MVP simplicity, consistent with "quality over quantity" directive).
+- FR-4.2: Ineligible repositories must never appear in recommendations. In manual search results, they should be flagged with an eligibility indicator and ranked lower, rather than excluded entirely, to allow user-directed lookup of specific repos while explaining why they are not recommended.
 - FR-4.3: Exact numeric thresholds (e.g., minimum stars, minimum commit recency window, minimum open issue count) are **TBD** — MRD specifies the criteria categories but not thresholds. Engineering should define initial defaults and treat them as tunable configuration, not hardcoded.
 
 **Acceptance Criteria**
@@ -430,7 +430,7 @@ Each feature below includes functional requirements, user stories, acceptance cr
 
 **6.5.1 Caching Behavior**
 - FR-5.5: Repository analysis is cached per repository, default branch, target commit SHA, and analysis version (not per user, since the underlying repo summary is not user-specific).
-- FR-5.6: Cache invalidation happens when the default branch changes or a new commit is pushed. The cache must be refreshed/re-generated when changes render the previous analysis version stale.
+- FR-5.6: Cache invalidation occurs when a new commit is pushed or the default branch changes. To ensure data freshness, the system checks GitHub for default branch/commit SHA updates when cached metadata is older than 24 hours (TTL); if a new commit SHA is detected, a new analysis is performed on open.
 - FR-5.7: Cached analysis displays a "last analyzed" timestamp, default branch name, commit SHA, and analysis version for transparency.
 
 **Acceptance Criteria**
@@ -822,7 +822,7 @@ Authentication uses a per-user Jules API key passed via the `X-Goog-Api-Key` hea
 
 ### 6.12 Feature: Background Job Worker Queue (Durable Background Jobs)
 
-**Purpose:** Provide a durable, retriable queue for long-running asynchronous tasks (profile analysis, repository crawling, opportunity discovery, and blueprint generation) to support worker recovery, progress polling, and idempotency.
+**Purpose:** Provide a durable, retriable queue for long-running asynchronous tasks (`"profile_analysis"`, `"recommendation_generation"`, `"repo_analysis"`, and `"blueprint_generation"`) to support worker recovery, progress polling, and idempotency.
 
 **Functional Requirements:**
 - FR-12.1: Long-running async steps must be initiated by writing a task to the `background_jobs` store, returning a `job_id` and setting status to `queued`.
@@ -832,7 +832,7 @@ Authentication uses a per-user Jules API key passed via the `X-Goog-Api-Key` hea
 - FR-12.5: All jobs require an `idempotency_key` to guarantee duplicate request retries from the client do not spin up duplicate jobs.
 
 **Database Requirements:**
-- `background_jobs` collection: `_id` (ObjectId), `job_type` (string), `status` (string: queued/running/completed/failed/dead_letter), `retries` (int), `attempt_count` (int), `idempotency_key` (string), `worker_lease` (string), `timeout` (int), `dead_letter_state` (document), `payload` (document), `created_at` (datetime), `updated_at` (datetime).
+- `background_jobs` collection: `_id` (ObjectId), `job_type` (string: `"profile_analysis"` | `"recommendation_generation"` | `"repo_analysis"` | `"blueprint_generation"`), `status` (string: queued/running/completed/failed/dead_letter), `retries` (int), `attempt_count` (int), `idempotency_key` (string), `worker_lease` (string), `timeout` (int), `dead_letter_state` (document), `payload` (document), `created_at` (datetime), `updated_at` (datetime).
 
 ---
 
@@ -945,12 +945,14 @@ Exact schema types, indexes, and migrations are left to engineering; the above d
 | `/api/repositories/:id/analyze` | POST | [Phase 2] Force re-analysis |
 | `/api/repositories/:id/analysis-status` | GET | [Phase 2] Poll analysis status |
 | `/api/repositories/:id/opportunities` | GET | [Phase 2] Tiered contribution opportunities |
-| `/api/repositories/:id/state` | POST/DELETE/PATCH | [Phase 2] Update/query user repository view/save/dismiss state |
+| `/api/repositories/:id/save` | POST | [Phase 2] Save repository for later |
+| `/api/repositories/:id/save` | DELETE | [Phase 2] Unsave repository |
 | `/api/blueprints` | POST | [Phase 3] Generate Blueprint (v1 or new version under group ID) |
 | `/api/blueprints/:id` | GET | [Phase 3] Retrieve a specific Blueprint version |
 | `/api/blueprints/group/:group_id` | GET | [Phase 3] List versions of a blueprint group |
-| `/api/blueprints?user_id=me` | GET | [Phase 3] List user's latest Blueprints |
-| `/api/blueprints/:id/jules-handoff` | GET | [Phase 3] Formatted handoff payload |
+| `/api/blueprints` | GET | [Phase 3] List all blueprints for the authenticated user |
+| `/api/blueprints/:id` | PATCH | [Phase 3] Update or regenerate a blueprint section |
+| `/api/blueprints/:id/jules-handoff` | POST | [Phase 3] Create a Jules Session via the Jules REST API (handoff) |
 | `/api/search` | GET | [Phase 2] Manual repo search |
 | `/api/history/repositories` | GET | [Phase 2] Recently viewed from repository states |
 | `/api/history/blueprints` | GET | [Phase 2/3] Blueprint history (all versions) |

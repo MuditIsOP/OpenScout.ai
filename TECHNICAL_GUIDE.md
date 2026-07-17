@@ -377,6 +377,8 @@ Each collection maps to a PRD concept. Below is the schema definition for each c
 | `github_id` | string (unique) | GitHub user ID |
 | `github_username` | string | GitHub login handle |
 | `avatar_url` | string | Profile image URL |
+| `current_profile_job_id` | string (nullable) | Active profile analysis job reference |
+| `profile_analysis_status` | string | Onboarding/analysis status (`not_started`/`in_progress`/`completed`/`failed`) |
 | `created_at` | datetime | Account creation timestamp |
 | `last_login_at` | datetime | Most recent sign-in |
 
@@ -644,7 +646,7 @@ Each collection maps to a PRD concept. Below is the schema definition for each c
 | Field | Type | Description |
 |---|---|---|
 | `id` | UUID (string) | Primary key |
-| `job_type` | string | Task type (`profile_analysis`/`repo_analysis` etc.) |
+| `job_type` | string | Task type (`"profile_analysis"`/`"recommendation_generation"`/`"repo_analysis"`/`"blueprint_generation"`) |
 | `status` | string | Status (`queued`/`running`/`completed`/`failed`/`dead_letter`) |
 | `retries` | integer | Max retry count |
 | `attempt_count` | integer | Executed attempt count |
@@ -941,12 +943,15 @@ All endpoints require JWT authentication unless otherwise noted. The base URL fo
 |---|---|---|---|
 | `/api/profile/analyze` | POST | JWT | Trigger profile (re)analysis. Returns `202 Accepted` with task ID |
 | `/api/profile/me` | GET | JWT | Get profile analysis results (skills, experience, confidence) |
+| `/api/profile/preferences` | PUT | JWT | Save manual profile onboarding preferences |
 
 ### 10.3 Recommendations
 
 | Endpoint | Method | Auth | Description |
 |---|---|---|---|
+| `/api/recommendations/generate` | POST | JWT | Trigger asynchronous recommendations generation |
 | `/api/recommendations` | GET | JWT | Personalized repository recommendations (ranked by match score) |
+| `/api/recommendations/runs/:run_id` | GET | JWT | Retrieve recommendations from a specific run |
 | `/api/recommendations/feedback` | POST | JWT | Submit feedback signal (dismiss / save) |
 
 ### 10.4 Repositories
@@ -966,6 +971,7 @@ All endpoints require JWT authentication unless otherwise noted. The base URL fo
 |---|---|---|---|
 | `/api/blueprints` | POST | JWT | Generate a new blueprint for a given opportunity |
 | `/api/blueprints/:id` | GET | JWT | Retrieve a specific blueprint |
+| `/api/blueprints/group/:group_id` | GET | JWT | List versions of a blueprint group |
 | `/api/blueprints` | GET | JWT | List all blueprints for the authenticated user |
 | `/api/blueprints/:id` | PATCH | JWT | Update or regenerate a blueprint section |
 | `/api/blueprints/:id/jules-handoff` | POST | JWT | Create a Jules Session via the Jules REST API with the Blueprint's prompt. Returns `{ session_url, session_id, method }` on success, or `{ prompt, method: "copy", error_reason }` on failure |
@@ -1198,9 +1204,9 @@ main              ← production-ready code
 | What | Where | TTL | Invalidation |
 |---|---|---|---|
 | Repository metadata | MongoDB (`repositories` collection) | 24 hours | On manual re-analysis |
-| Repository analysis | MongoDB (`repository_analyses` collection) | 24 hours | On manual re-analysis or default branch / commit SHA updates. Keyed on `repository_id + commit_sha + analysis_version`. |
+| Repository analysis | MongoDB (`repository_analyses` collection) | 24 hours (metadata check) | Check GitHub for updates if metadata >24h old. Cached analysis reused if commit SHA is unchanged. Keyed on `repository_id + commit_sha + analysis_version`. |
 | Clerk JWKS | In-memory (backend process) | Indefinite (until restart) | Server restart |
-| Developer profile | MongoDB (`developer_profiles` collection) | Until re-analysis | On manual re-analysis |
+| Developer profile | MongoDB (`developer_profiles` collection) | 7 days | Automatically on login if >7 days old, or on manual re-analysis |
 
 
 ### 15.2 Performance Targets
@@ -1211,7 +1217,7 @@ main              ← production-ready code
 | Repository detail (cached) | < 300ms | Serve cached analysis from MongoDB |
 | Repository detail (fresh analysis) | 10–30s | Async task pattern with polling. User sees skeleton UI during analysis |
 | Blueprint generation | 15–45s | Async task pattern with progressive section reveal |
-| Search | < 1s | MongoDB text index with pre-filtered eligible repos |
+| Search | < 2s | Proxy live GitHub Search API + merge with cached local results/eligibility |
 
 ### 15.3 Scalability Path
 
