@@ -4,15 +4,51 @@ import sys
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 
-# Connection string from user
-MONGODB_URI = "mongodb+srv://mudit8sharma:tMngkHav1RhdwkYf@openscoutai.duyn54j.mongodb.net/?appName=OpenScoutAI"
-DB_NAME = "openscoutai"
+def load_dotenv():
+    # Try finding .env in script directory, backend directory, or root directory
+    search_dirs = [
+        os.path.dirname(__file__),
+        os.path.join(os.path.dirname(__file__), ".."),
+        os.path.join(os.path.dirname(__file__), "..", "..")
+    ]
+    for d in search_dirs:
+        dotenv_path = os.path.join(d, ".env")
+        if os.path.exists(dotenv_path):
+            with open(dotenv_path, "r") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split("=", 1)
+                    if len(parts) == 2:
+                        key = parts[0].strip()
+                        val = parts[1].strip().strip('"').strip("'")
+                        if key not in os.environ:
+                            os.environ[key] = val
+
+# Load local environment variables
+load_dotenv()
+
+# Connection config from environment
+MONGODB_URI = os.environ.get("MONGODB_URI")
+DB_NAME = os.environ.get("MONGODB_DB_NAME", "openscoutai")
 
 # Path to Phase 1 Schema file
 SCHEMA_FILE_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "Documentation", "phase_1_schema.json")
 
 def setup_database():
-    print(f"Connecting to MongoDB Atlas at: {MONGODB_URI.split('@')[1]}")
+    if not MONGODB_URI:
+        print("Error: MONGODB_URI environment variable is not set.")
+        print("Please configure it in a .env file or set it in your environment.")
+        sys.exit(1)
+        
+    # Mask password for logging
+    connection_display = MONGODB_URI
+    if "@" in MONGODB_URI:
+        parts = MONGODB_URI.split("@")
+        connection_display = f"***:***@{parts[1]}"
+    print(f"Connecting to MongoDB Atlas at: {connection_display}")
+    
     try:
         client = MongoClient(MONGODB_URI)
         db = client[DB_NAME]
