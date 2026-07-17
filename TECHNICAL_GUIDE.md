@@ -378,7 +378,7 @@ Each collection maps to a PRD concept. Below is the schema definition for each c
 | `github_username` | string | GitHub login handle |
 | `avatar_url` | string | Profile image URL |
 | `current_profile_job_id` | string (nullable) | Active profile analysis job reference |
-| `profile_analysis_status` | string | Onboarding/analysis status (`not_started`/`in_progress`/`completed`/`failed`) |
+| `profile_analysis_status` | string | Onboarding/analysis status (`queued`/`in_progress`/`complete`/`failed`) |
 | `created_at` | datetime | Account creation timestamp |
 | `last_login_at` | datetime | Most recent sign-in |
 
@@ -790,7 +790,7 @@ When Clerk fires a `user.created` event (after first GitHub OAuth sign-in), the 
 
 1. Extracts the GitHub OAuth account from the user's `external_accounts` array.
 2. Creates a new document in the `users` collection with `clerk_id`, `github_id`, `github_username`, and `avatar_url`.
-3. Sets `profile_analysis_status` to `"pending"`.
+3. Sets `profile_analysis_status` to `"queued"`.
 4. Triggers an async profile analysis task.
 
 Webhook payloads are verified using the **svix** library to ensure they originate from Clerk.

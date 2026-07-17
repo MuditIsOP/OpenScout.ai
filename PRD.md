@@ -262,7 +262,7 @@ Each feature below includes functional requirements, user stories, acceptance cr
 - No dedicated screen; surfaces within the Dashboard (§6.9) as a "Your Profile" / "What we detected" module.
 
 **Loading States**
-- Dashboard shows skeleton cards for the skills module while `analysis_status = pending|in_progress`.
+- Dashboard shows skeleton cards for the skills module while `analysis_status = queued|in_progress`.
 
 **Error Handling**
 - On `analysis_status = failed`: show a retry action and a message that recommendations may be limited until analysis succeeds.
