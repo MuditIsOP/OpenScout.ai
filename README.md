@@ -28,6 +28,7 @@ For detailed guidelines on the platform's requirements and technical specificati
 5.  **[Database Schema Specifications](./Documentation/SCHEMA.md)**: Production-ready MongoDB collection structures, indexes, and document validations.
 6.  **[Phase 1 MongoDB JSON Schema](./Documentation/phase_1_schema.json)**: Production validation schemas for the core Phase 1 database collections.
 7.  **[Technical Architecture & Guide](./Documentation/TECHNICAL_GUIDE.md)**: Monorepo configuration, API contracts, deployment topologies, and environment variables.
+8.  **[API & Screens Reference](./Documentation/API_SCREENS_REFERENCE.md)**: Screen-to-API mapping, request/response contracts, shared endpoints, edge cases, and stress tests.
 
 ---
 
