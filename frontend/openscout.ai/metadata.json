@@ -1,0 +1,6 @@
+{
+  "name": "OpenScout.ai",
+  "description": "Analyze your developer profile and find matching open-source projects.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
